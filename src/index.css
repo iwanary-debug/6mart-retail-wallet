@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 33% 98%;
+    --foreground: 165 35% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 165 35% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 165 35% 12%;
+
+    --primary: 163 72% 24%;
+    --primary-foreground: 45 60% 97%;
+
+    --secondary: 150 25% 94%;
+    --secondary-foreground: 163 60% 18%;
+
+    --muted: 45 20% 95%;
+    --muted-foreground: 165 12% 42%;
+
+    --accent: 35 92% 52%;
+    --accent-foreground: 30 60% 12%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 62% 34%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 35 92% 45%;
+    --warning-foreground: 30 60% 12%;
+
+    --border: 45 15% 88%;
+    --input: 45 15% 88%;
+    --ring: 163 72% 24%;
+
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 165 40% 7%;
+    --foreground: 45 30% 95%;
+
+    --card: 165 32% 10%;
+    --card-foreground: 45 30% 95%;
+
+    --popover: 165 32% 10%;
+    --popover-foreground: 45 30% 95%;
+
+    --primary: 155 58% 45%;
+    --primary-foreground: 165 45% 8%;
+
+    --secondary: 165 22% 16%;
+    --secondary-foreground: 45 30% 95%;
+
+    --muted: 165 20% 16%;
+    --muted-foreground: 150 10% 62%;
+
+    --accent: 35 92% 55%;
+    --accent-foreground: 30 60% 10%;
+
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 52% 45%;
+    --success-foreground: 165 45% 8%;
+
+    --warning: 35 88% 55%;
+    --warning-foreground: 30 60% 10%;
+
+    --border: 165 18% 20%;
+    --input: 165 18% 20%;
+    --ring: 155 58% 45%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+}
+
+@layer components {
+  .sixmart-grid {
+    background-image:
+      linear-gradient(to right, hsl(163 30% 20% / 0.07) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(163 30% 20% / 0.07) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+
+  .dark .sixmart-grid {
+    background-image:
+      linear-gradient(to right, hsl(155 40% 60% / 0.08) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(155 40% 60% / 0.08) 1px, transparent 1px);
+  }
+
+  .stat-tile {
+    @apply relative overflow-hidden rounded-lg border border-border bg-card p-4;
+  }
+}
+
+@layer utilities {
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
