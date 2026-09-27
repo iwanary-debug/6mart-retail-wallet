@@ -8,3 +8,11 @@ build/
 *.log
 coverage/
 .vscode/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Freebuff preview runtime state
+.vly-run/
+.render-check.mjs
+smoke-bundle.mjs
