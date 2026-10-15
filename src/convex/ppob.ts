@@ -146,6 +146,11 @@ export const createTransaction = mutation({
     studentId: v.optional(v.id("students")),
     paymentMethod: v.union(v.literal("WALLET"), v.literal("CASH")),
     idempotencyKey: v.string(),
+    /**
+     * Transaksi dibuat dan di-charge ke provider, tetapi pembayaran ditunda:
+     * kasir menyelesaikannya di halaman kasir lewat `payTransaction`.
+     */
+    deferPayment: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
@@ -189,8 +194,9 @@ export const createTransaction = mutation({
         updatedAt: now,
       });
 
-      // 2. Debit wallet bila diperlukan (happens sebelum charge).
-      if (args.paymentMethod === "WALLET") {
+      // 2. Debit wallet bila diperlukan (happens sebelum charge). Saat
+      //    pembayaran ditunda, debitnya dilakukan di halaman kasir.
+      if (args.paymentMethod === "WALLET" && !args.deferPayment) {
         if (!args.studentId) {
           throw new BusinessRuleError("Santri wajib diisi untuk pembayaran wallet");
         }
@@ -222,7 +228,7 @@ export const createTransaction = mutation({
 
       if (response.status === "FAILED") {
         // Kembalikan dana bila sudah ter-debit.
-        if (args.paymentMethod === "WALLET" && args.studentId) {
+        if (args.paymentMethod === "WALLET" && args.studentId && !args.deferPayment) {
           await mutateWallet(ctx, user, {
             studentId: args.studentId,
             type: "REFUND",
@@ -241,6 +247,40 @@ export const createTransaction = mutation({
         });
         await failIdempotent(ctx, "ppob.create", args.idempotencyKey);
         throw new BusinessRuleError(`PPOB gagal: ${response.message}`);
+      }
+
+      // 3b. Pembayaran ditunda: provider sudah charged, tetapi pelanggan
+      //     belum membayar. Transaksi menunggu di halaman kasir.
+      if (args.deferPayment) {
+        await ctx.db.patch(txId, {
+          status: "AWAITING_PAYMENT",
+          message: response.message,
+          providerReference: response.providerReference,
+          updatedAt: Date.now(),
+        });
+        const deferred = {
+          transactionId: txId,
+          code,
+          status: "AWAITING_PAYMENT" as const,
+          price: product.price,
+          serialNumber: response.serialNumber,
+          provider: provider.name,
+          environment: provider.environment,
+        };
+        await completeIdempotent(ctx, "ppob.create", args.idempotencyKey, deferred);
+        await writeAudit(ctx, {
+          user,
+          action: "PPOB_TRANSACTION",
+          entityType: "ppobTransaction",
+          entityId: txId,
+          newValue: {
+            code,
+            product: product.name,
+            price: product.price,
+            status: "AWAITING_PAYMENT",
+          },
+        });
+        return { ...deferred, replayed: false };
       }
 
       // 4. Jurnal pendapatan PPOB + HPP ke provider.
@@ -355,6 +395,162 @@ export const createTransaction = mutation({
       await failIdempotent(ctx, "ppob.create", args.idempotencyKey);
       throw error;
     }
+  },
+});
+
+/** Satu transaksi PPOB, untuk pembayaran di halaman kasir. */
+export const getTransaction = query({
+  args: { transactionId: v.id("ppobTransactions") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    assertPermission(user, PERMISSIONS.SERVICE_PPOB);
+    const transaction = await ctx.db.get(args.transactionId);
+    if (!transaction) throw new NotFoundError("Transaksi tidak ditemukan");
+    return { transaction };
+  },
+});
+
+/**
+ * Menyelesaikan pembayaran transaksi PPOB yang ditunda.
+ *
+ * Dipanggil dari halaman kasir ketika kasir menekan "Bayar" pada transaksi
+ * berstatus AWAITING_PAYMENT. Provider sudah di-charge saat transaksi dibuat;
+ * yang belum dilakukan adalah pencatatan penjualan, kas, dan jurnalnya.
+ */
+export const payTransaction = mutation({
+  args: {
+    transactionId: v.id("ppobTransactions"),
+    method: v.union(v.literal("WALLET"), v.literal("CASH")),
+    idempotencyKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    assertPermission(user, PERMISSIONS.SERVICE_PPOB);
+
+    const tx = await ctx.db.get(args.transactionId);
+    if (!tx) throw new NotFoundError("Transaksi tidak ditemukan");
+    if (tx.saleId) throw new BusinessRuleError("Transaksi sudah dibayar");
+    if (tx.status !== "AWAITING_PAYMENT") {
+      throw new BusinessRuleError(
+        `Transaksi berstatus ${tx.status}, tidak bisa dibayar`,
+      );
+    }
+    if (tx.price <= 0) throw new BusinessRuleError("Nominal transaksi tidak valid");
+
+    const now = Date.now();
+    const code = tx.code;
+    const product = tx.productId ? await ctx.db.get(tx.productId) : null;
+    const costPrice = product?.costPrice ?? tx.costPrice;
+
+    if (args.method === "WALLET") {
+      if (!tx.customerStudentId) {
+        throw new BusinessRuleError("Santri belum ditentukan untuk pembayaran wallet");
+      }
+      await mutateWallet(ctx, user, {
+        studentId: tx.customerStudentId,
+        type: "PPOB",
+        amount: tx.price,
+        note: `PPOB ${code}`,
+        referenceType: "ppobTransaction",
+        referenceId: code,
+        idempotencyKey: args.idempotencyKey,
+      });
+    }
+
+    const saleId = await ctx.db.insert("sales", {
+      code: `SALE-${code}`,
+      invoiceNumber: `SALE-${code}`,
+      studentId: tx.customerStudentId,
+      studentName: tx.customerName,
+      cashierId: user.id,
+      cashierName: user.name,
+      channel: "SERVICE",
+      paymentMethod: args.method,
+      subtotal: tx.price,
+      discount: 0,
+      serviceTotal: tx.price,
+      total: tx.price,
+      paidAmount: tx.price,
+      changeAmount: 0,
+      costTotal: costPrice,
+      status: "COMPLETED",
+      idempotencyKey: args.idempotencyKey,
+      createdAt: now,
+    });
+
+    await ctx.db.insert("saleItems", {
+      saleId,
+      name: `PPOB — ${tx.productName}`,
+      quantity: 1,
+      unit: "trx",
+      sellingPrice: tx.price,
+      discount: 0,
+      costPrice,
+      subtotal: tx.price,
+      cogs: costPrice,
+      serviceType: "PPOB",
+      serviceRefId: code,
+      createdAt: now,
+    });
+
+    await ctx.db.insert("payments", {
+      saleId,
+      method: args.method,
+      amount: tx.price,
+      reference: tx.providerReference,
+      status: "SUCCESS",
+      createdAt: now,
+    });
+
+    if (args.method === "CASH") {
+      await ctx.db.insert("cashTransactions", {
+        type: "SALE",
+        direction: "IN",
+        amount: tx.price,
+        referenceType: "ppob",
+        referenceId: code,
+        createdBy: user.id,
+        createdAt: now,
+      });
+    }
+
+    await postJournal(ctx, {
+      entryDate: now,
+      description: `Pendapatan PPOB ${code}`,
+      source: "PPOB",
+      referenceType: "ppobTransaction",
+      referenceId: code,
+      lines:
+        args.method === "WALLET"
+          ? accounting.serviceWalletJournal(accounting.COA.PPOB_REVENUE, tx.price)
+          : accounting.serviceCashJournal(accounting.COA.PPOB_REVENUE, tx.price),
+      user,
+    });
+    await postJournal(ctx, {
+      entryDate: now,
+      description: `HPP PPOB ${code}`,
+      source: "PPOB",
+      referenceType: "ppobTransaction",
+      referenceId: code,
+      lines: accounting.ppobCogsJournal(costPrice),
+      user,
+    });
+
+    await ctx.db.patch(args.transactionId, {
+      status: "SUCCESS",
+      saleId,
+      updatedAt: now,
+    });
+
+    await writeAudit(ctx, {
+      user,
+      action: "PPOB_PAY",
+      entityType: "ppobTransaction",
+      entityId: args.transactionId,
+      newValue: { code, amount: tx.price, method: args.method },
+    });
+
+    return { saleId, code, amount: tx.price };
   },
 });
 

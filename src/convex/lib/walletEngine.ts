@@ -390,16 +390,21 @@ async function nextJournalCode(ctx: MutationCtx, entryDate: number): Promise<str
 
 export const walletMutationArgs = {
   studentId: v.id("students"),
-  type: v.union(
-    v.literal("TOPUP"),
-    v.literal("PURCHASE"),
-    v.literal("WITHDRAWAL"),
-    v.literal("REFUND"),
-    v.literal("ADJUSTMENT"),
-    v.literal("LAUNDRY"),
-    v.literal("BARBERSHOP"),
-    v.literal("JASTIP"),
-    v.literal("PPOB"),
+  // Opsional: setiap titik masuk (topUp/withdraw/adjust) sudah memaksa
+  // `type`-nya sendiri sebelum memanggil mutateWallet, jadi mewajibkan kolom
+  // ini hanya membuat klien wajib mengirim nilai yang kemudian dibuang.
+  type: v.optional(
+    v.union(
+      v.literal("TOPUP"),
+      v.literal("PURCHASE"),
+      v.literal("WITHDRAWAL"),
+      v.literal("REFUND"),
+      v.literal("ADJUSTMENT"),
+      v.literal("LAUNDRY"),
+      v.literal("BARBERSHOP"),
+      v.literal("JASTIP"),
+      v.literal("PPOB"),
+    ),
   ),
   amount: v.number(),
   note: v.optional(v.string()),

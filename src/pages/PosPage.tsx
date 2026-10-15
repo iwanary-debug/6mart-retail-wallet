@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ScanBarcode,
   Search,
@@ -24,6 +25,8 @@ import {
   Money,
   AlertBanner,
   EmptyState,
+  ErrorState,
+  LoadingState,
   errorMessage,
   formatTime,
 } from "@/components/common";
@@ -66,7 +69,429 @@ interface IdentifiedStudent {
 const newKey = () =>
   `pos-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
+/**
+ * Pecahan uang yang sering recited. Ditampilkan hanya yang >= tagihan, jadi
+ * kasir cukup klik satu tombol alih-alih menghitung uang pas sendiri.
+ */
+const CASH_DENOMINATIONS = [
+  100_000, 50_000, 20_000, 10_000, 5_000, 2_000, 1_000,
+];
+
+/**
+ * Pembayaran layanan di halaman kasir.
+ *
+ * Alurnya sama dengan belanja barang: order dibuat di menu layanan (atau PPOB),
+ * lalu kasir menyelesaikan pembayaran di sini. Kasir melihat subtotal, total,
+ * memilih skema pembayaran, memasukkan nominal yang diterima, melihat
+ * kembalian, lalu menekan Bayar — baru saat itu transaksi tercatat.
+ */
+type ServiceKind = "jastip" | "laundry" | "booking" | "ppob";
+
+function ServicePayPanel({ kind, id }: { kind: ServiceKind; id: string }) {
+  const navigate = useNavigate();
+
+  const jastip = useQuery(
+    api.services.getJastip,
+    kind === "jastip" ? { orderId: id as any } : "skip",
+  );
+  const laundry = useQuery(
+    api.services.getLaundry,
+    kind === "laundry" ? { orderId: id as any } : "skip",
+  );
+  const booking = useQuery(
+    api.services.getBooking,
+    kind === "booking" ? { bookingId: id as any } : "skip",
+  );
+  const ppobTx = useQuery(
+    api.ppob.getTransaction,
+    kind === "ppob" ? { transactionId: id as any } : "skip",
+  );
+
+  const payJastip = useMutation(api.services.payJastip);
+  const payLaundry = useMutation(api.services.payLaundry);
+  const payBooking = useMutation(api.services.payBooking);
+  const payPpob = useMutation(api.ppob.payTransaction);
+
+  const [method, setMethod] = useState<"CASH" | "WALLET">("CASH");
+  const [cashGiven, setCashGiven] = useState<number | "">("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<null | {
+    code: string;
+    total: number;
+    change: number;
+  }>(null);
+
+  const active = kind === "jastip" ? jastip : kind === "laundry" ? laundry : kind === "booking" ? booking : ppobTx;
+
+  /**
+   * Rincian dinormalisasi supaya panel ini tidak tahu bentuk tiap layanan.
+   *
+   * `useMemo` ini WAJIB berada sebelum early return di bawah. Hook yang
+   * dipanggil setelah `return` hanya berjalan pada render pertama; begitu
+   * query selesai, jumlah hook berubah dan React melempar
+   * "Rendered more hooks than during the previous render".
+   */
+  const view = useMemo(() => {
+    if (active === undefined) return null;
+    if ("error" in active) return null;
+    const d = active as any;
+    if (kind === "jastip") {
+      const o = d.order;
+      return {
+        code: o.code,
+        title: o.customerName,
+        lines: (d.items ?? []).map((it: any) => ({
+          label: `${it.orderType ?? it.name ?? "Barang"} × ${it.quantity}`,
+          amount: it.quantity * it.price,
+        })),
+        subtotal: o.itemsTotal ?? 0,
+        fees: [
+          { label: "Jasa layanan", amount: o.serviceFee ?? 0 },
+          ...(o.deliveryFee
+            ? [{ label: "Ongkos kirim", amount: o.deliveryFee }]
+            : []),
+        ],
+        total:
+          (o.itemsTotal ?? 0) + (o.serviceFee ?? 0) + (o.deliveryFee ?? 0),
+        walletStudentId: o.customerStudentId,
+        paid: !!o.saleId,
+      };
+    }
+    if (kind === "laundry") {
+      const o = d.order;
+      return {
+        code: o.code,
+        title: o.customerName,
+        lines: [
+          {
+            label: `Harga laundry — ${o.serviceType} ${o.weightKg} kg × ${o.pricePerKg}`,
+            amount: o.weightKg * o.pricePerKg,
+          },
+          ...(d.items ?? []).map((it: any) => ({
+            label: `${it.name} × ${it.quantity}`,
+            amount: it.subtotal,
+          })),
+        ],
+        subtotal: o.weightKg * o.pricePerKg,
+        fees: [{ label: "Jasa layanan", amount: o.serviceFee ?? 0 }],
+        total: o.totalAmount ?? o.weightKg * o.pricePerKg,
+        walletStudentId: o.customerStudentId,
+        paid: !!o.saleId,
+      };
+    }
+    if (kind === "booking") {
+      const b = d.booking;
+      return {
+        code: b.code,
+        title: b.customerName,
+        lines: [
+          { label: `Harga jasa — ${d.service?.name ?? "Layanan"}`, amount: b.price },
+        ],
+        subtotal: b.price,
+        fees: [{ label: "Jasa layanan", amount: b.serviceFee ?? 0 }],
+        total: b.totalAmount ?? b.price + (b.serviceFee ?? 0),
+        walletStudentId: b.customerStudentId,
+        paid: !!b.saleId,
+      };
+    }
+    const t = d.transaction;
+    return {
+      code: t.code,
+      title: t.productName,
+      lines: [{ label: t.productName, amount: t.price }],
+      subtotal: t.price,
+      fees: [],
+      total: t.price,
+      walletStudentId: t.customerStudentId,
+      paid: !!t.saleId,
+    };
+  }, [active, kind]);
+
+  if (active === undefined) {
+    return <LoadingState label="Memuat order…" />;
+  }
+  if ("error" in active) {
+    return <ErrorState message={String((active as any).error)} />;
+  }
+  if (view === null) {
+    return <LoadingState label="Memuat order…" />;
+  }
+
+  const backPath = kind === "ppob" ? "/app/ppob" : "/app/layanan";
+
+  if (view.paid) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title="Bayar" description={`Order ${view.code} sudah dibayar.`} />
+        <AlertBanner variant="INFO" title="Sudah lunas">
+          Order {view.code} tidak bisa dibayar lagi.
+        </AlertBanner>
+        <Button onClick={() => navigate(backPath)}>Kembali</Button>
+      </div>
+    );
+  }
+
+  const total = view.total;
+  const given = typeof cashGiven === "number" ? cashGiven : 0;
+  const change = Math.max(0, given - total);
+  const short = Math.max(0, total - given);
+  const canPay = method === "WALLET" ? !!view.walletStudentId : short === 0;
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const key = `${kind}-pos-${id}`;
+      if (kind === "jastip") {
+        await payJastip({ orderId: id as any, method, idempotencyKey: key });
+      } else if (kind === "laundry") {
+        await payLaundry({ orderId: id as any, method, idempotencyKey: key });
+      } else if (kind === "booking") {
+        await payBooking({ bookingId: id as any, method, idempotencyKey: key });
+      } else {
+        await payPpob({ transactionId: id as any, method, idempotencyKey: key });
+      }
+      setDone({ code: view.code, total, change: method === "CASH" ? change : 0 });
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <div className="space-y-4">
+        <PageHeader title="Transaksi Selesai" description={`Order ${done.code}.`} />
+        <Card>
+          <CardContent className="space-y-3 py-6 text-center">
+            <CheckCircle2 className="mx-auto h-12 w-12 text-primary" />
+            <p className="text-sm text-muted-foreground">Transaksi tercatat</p>
+            <p className="text-3xl font-extrabold tabular-nums">
+              <Money value={done.total} />
+            </p>
+            {done.change > 0 && (
+              <div className="rounded-lg border border-primary/40 bg-primary/5 px-3 py-2">
+                <p className="text-sm text-muted-foreground">Kembalian</p>
+                <p className="text-2xl font-extrabold tabular-nums text-primary">
+                  <Money value={done.change} />
+                </p>
+              </div>
+            )}
+            <div className="flex gap-2 pt-2">
+              <Button className="flex-1" onClick={() => navigate(backPath)}>
+                Kembali
+              </Button>
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => {
+                  setDone(null);
+                  setCashGiven("");
+                }}
+              >
+                Bayar yang Lain
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <PageHeader
+        title="Bayar"
+        description={`${view.code} — ${view.title}`}
+        action={
+          <Button variant="outline" onClick={() => navigate(backPath)}>
+            Kembali
+          </Button>
+        }
+      />
+
+      {error && <AlertBanner variant="ERROR" title="Pembayaran gagal">{error}</AlertBanner>}
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Rincian</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Pelanggan</span>
+              <span className="font-medium">{view.title}</span>
+            </div>
+            {view.lines.map((l: { label: string; amount: number }, i: number) => (
+              <div key={i} className="flex justify-between text-xs text-muted-foreground">
+                <span>{l.label}</span>
+                <span className="tabular-nums">
+                  <Money value={l.amount} />
+                </span>
+              </div>
+            ))}
+            <div className="flex justify-between border-t border-dashed border-border pt-2">
+              <span className="text-muted-foreground">Subtotal</span>
+              <span className="tabular-nums">
+                <Money value={view.subtotal} />
+              </span>
+            </div>
+            {view.fees.map((f, i) => (
+              <div key={i} className="flex justify-between">
+                <span className="text-muted-foreground">{f.label}</span>
+                <span className="tabular-nums">
+                  <Money value={f.amount} />
+                </span>
+              </div>
+            ))}
+            <div className="flex justify-between border-t border-border pt-2 text-base">
+              <span className="font-bold">Total</span>
+              <span className="font-extrabold tabular-nums">
+                <Money value={total} />
+              </span>
+            </div>
+            {kind === "jastip" && (
+              <p className="pt-1 text-[11px] leading-relaxed text-muted-foreground">
+                Nilai pesanan ikut ditagih di sini, ditambah jasa layanan.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Pembayaran</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-2 gap-1.5">
+              {(["CASH", "WALLET"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMethod(m)}
+                  disabled={m === "WALLET" && !view.walletStudentId}
+                  className={cn(
+                    "flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+                    method === m
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border hover:bg-muted",
+                  )}
+                >
+                  {m === "CASH" ? <Banknote className="h-4 w-4" /> : <Wallet className="h-4 w-4" />}
+                  {m === "CASH" ? "Tunai" : "Wallet"}
+                </button>
+              ))}
+            </div>
+
+            {method === "CASH" ? (
+              <>
+                <div className="space-y-1.5">
+                  <div className="flex items-baseline justify-between">
+                    <label className="text-xs text-muted-foreground">
+                      Uang diterima
+                    </label>
+                    <span className="text-xs text-muted-foreground">
+                      Tagihan <Money value={total} />
+                    </span>
+                  </div>
+                  <Input
+                    value={cashGiven}
+                    inputMode="numeric"
+                    placeholder="0"
+                    className="h-12 text-lg font-semibold tabular-nums"
+                    onChange={(e) => setCashGiven(Number(e.target.value) || "")}
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={given === total ? "default" : "outline"}
+                      onClick={() => setCashGiven(total)}
+                    >
+                      Uang pas
+                    </Button>
+                    {CASH_DENOMINATIONS.filter((d) => d >= total).map((d) => (
+                      <Button
+                        key={d}
+                        type="button"
+                        size="sm"
+                        variant={given === d ? "default" : "outline"}
+                        onClick={() => setCashGiven(d)}
+                      >
+                        <Money value={d} />
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+
+                {given > 0 && (
+                  <div
+                    className={cn(
+                      "flex items-center justify-between rounded-lg border px-3 py-2.5",
+                      short > 0
+                        ? "border-destructive/40 bg-destructive/5"
+                        : "border-primary/40 bg-primary/5",
+                    )}
+                  >
+                    <span className="text-sm font-medium text-muted-foreground">
+                      {short > 0 ? "Kurang" : "Kembalian"}
+                    </span>
+                    <span
+                      className={cn(
+                        "text-xl font-extrabold tabular-nums",
+                        short > 0 ? "text-destructive" : "text-primary",
+                      )}
+                    >
+                      <Money value={short > 0 ? short : change} />
+                    </span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Saldo wallet Charging akan dipotong dan tercatat sebagai penjualan
+                layanan.
+              </p>
+            )}
+
+            <Button
+              size="xl"
+              className="w-full"
+              disabled={busy || !canPay}
+              onClick={submit}
+            >
+              {busy ? (
+                <>
+                  <Loader2 className="h-5 w-5 animate-spin" /> Memproses…
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="h-5 w-5" /> Bayar — <Money value={total} />
+                </>
+              )}
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 export default function PosPage() {
+  // Order layanan dan PPOB yang dibuat di halaman lain diselesaikan
+  // pembayarannya di sini, dengan alur yang sama seperti belanja barang.
+  const [searchParams] = useSearchParams();
+  for (const kind of ["jastip", "laundry", "booking", "ppob"] as const) {
+    const id = searchParams.get(kind);
+    if (id) return <ServicePayPanel kind={kind} id={id} />;
+  }
+
+  return <CounterTerminal />;
+}
+
+function CounterTerminal() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [term, setTerm] = useState("");
   const [student, setStudent] = useState<IdentifiedStudent | null>(null);
@@ -114,10 +539,20 @@ export default function PosPage() {
   const walletAmount = payMethod === "WALLET" ? total : payMethod === "MIXED" ? walletUse : 0;
   const cashAmount = Math.max(0, total - walletAmount);
   const cashGivenNum = typeof cashGiven === "number" ? cashGiven : 0;
-  const change = Math.max(0, cashGivenNum - total);
+  // Kembalian dihitung dari nominal TUNAI yang jatuh tempo, bukan dari total.
+  // Pada pembayaran campuran sisanya dibayar wallet, jadi kalau `total` yang
+  // dipakai, kembalian akan terlihat lebih besar dari seharusnya.
+  const change = Math.max(0, cashGivenNum - cashAmount);
+  const cashShort = Math.max(0, cashAmount - cashGivenNum);
   const insufficient =
     student !== null && walletAmount > student.balance;
-  const canPay = cart.length > 0 && total > 0 && (walletAmount > 0 || cashAmount > 0);
+  const canPay =
+    cart.length > 0 &&
+    total > 0 &&
+    (walletAmount > 0 || cashAmount > 0) &&
+    // Uang tunai yang diterima harus menutup tagihan; tanpa ini kasir bisa
+    // menyelesaikan penjualan tunai yang belum lunas.
+    cashShort === 0;
 
   // ------------------------------------------------------------ cart actions ----
   const addToCart = useCallback((p: {
@@ -249,6 +684,9 @@ export default function PosPage() {
         identificationMethod: student?.method,
         walletAmount,
         cashAmount,
+        // Uang yang benar-benar diterima pelanggan, supaya kembalian
+        // bisa dihitung dan dicetak di struk.
+        cashTendered: cashGivenNum > 0 ? cashGivenNum : cashAmount,
         idempotencyKey: newKey(),
       });
       setSuccess({ ...res, elapsed: Date.now() - startedAt.current });
@@ -642,16 +1080,71 @@ export default function PosPage() {
               )}
 
               {cashAmount > 0 && (
-                <div className="space-y-1.5">
-                  <label className="text-xs text-muted-foreground">
-                    Uang diterima (kembalian: <Money value={change} />)
-                  </label>
+                <div className="space-y-2">
+                  <div className="flex items-baseline justify-between">
+                    <label className="text-xs text-muted-foreground">
+                      Uang diterima
+                    </label>
+                    <span className="text-xs text-muted-foreground">
+                      Tagihan tunai <Money value={cashAmount} />
+                    </span>
+                  </div>
+
                   <Input
                     value={cashGiven}
                     inputMode="numeric"
                     placeholder="0"
+                    className="h-12 text-lg font-semibold tabular-nums"
                     onChange={(e) => setCashGiven(Number(e.target.value) || "")}
                   />
+
+                  {/* denomination uang: klik saja, tidak perlu mengetik nominal */}
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={cashGivenNum === cashAmount ? "default" : "outline"}
+                      onClick={() => setCashGiven(cashAmount)}
+                    >
+                      Uang pas
+                    </Button>
+                    {CASH_DENOMINATIONS.filter((d) => d >= cashAmount).map((d) => (
+                      <Button
+                        key={d}
+                        type="button"
+                        size="sm"
+                        variant={cashGivenNum === d ? "default" : "outline"}
+                        onClick={() => setCashGiven(d)}
+                      >
+                        <Money value={d} />
+                      </Button>
+                    ))}
+                  </div>
+
+                  {/* Kembalian ditampilkan besar dan jelas, bukan teks kecil
+                      di dalam label — kasir membacanya sambil menghitung. */}
+                  {cashGivenNum > 0 && (
+                    <div
+                      className={cn(
+                        "flex items-center justify-between rounded-lg border px-3 py-2.5",
+                        cashShort > 0
+                          ? "border-destructive/40 bg-destructive/5"
+                          : "border-primary/40 bg-primary/5",
+                      )}
+                    >
+                      <span className="text-sm font-medium text-muted-foreground">
+                        {cashShort > 0 ? "Kurang" : "Kembalian"}
+                      </span>
+                      <span
+                        className={cn(
+                          "text-xl font-extrabold tabular-nums",
+                          cashShort > 0 ? "text-destructive" : "text-primary",
+                        )}
+                      >
+                        <Money value={cashShort > 0 ? cashShort : change} />
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -798,11 +1291,18 @@ function ShiftCloseDialog({
 
   useEffect(() => {
     if (open && shift && !("error" in shift)) {
-      const s = (shift as any).shift;
+      const d = shift as any;
+      // Expected TIDAK diambil dari `shift.expectedCash`: field itu hanya
+      // diisi saat shift ditutup, jadi selama shift terbuka masih bernilai
+      // modal awal saja. `shiftDetail` sudah menghitungnya ulang dari
+      // transaksi kas.
       setDetail({
-        expectedCash: s.expectedCash,
-        cashSales: s.cashSales,
-        openingCash: s.openingCash,
+        openingCash: d.shift?.openingCash ?? 0,
+        cashSales: d.cashSales ?? 0,
+        cashIn: d.cashIn ?? 0,
+        cashOut: d.cashOut ?? 0,
+        expenses: d.expenses ?? 0,
+        expectedCash: d.expectedCash ?? 0,
       });
     }
   }, [open, shift]);
@@ -827,6 +1327,22 @@ function ShiftCloseDialog({
               <span className="text-muted-foreground">Penjualan tunai</span>
               <span className="tabular-nums">{formatRupiah(detail.cashSales)}</span>
             </div>
+            {detail.cashIn > 0 && (
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Kas masuk</span>
+                <span className="tabular-nums">{formatRupiah(detail.cashIn)}</span>
+              </div>
+            )}
+            {(detail.cashOut > 0 || detail.expenses > 0) && (
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">
+                  Kas keluar &amp; pengeluaran
+                </span>
+                <span className="tabular-nums">
+                  −{formatRupiah(detail.cashOut + detail.expenses)}
+                </span>
+              </div>
+            )}
             <div className="flex justify-between font-bold">
               <span>Harus ada</span>
               <span className="tabular-nums">{formatRupiah(detail.expectedCash)}</span>

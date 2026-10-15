@@ -364,6 +364,9 @@ export default defineSchema({
     serviceTotal: v.number(), // laundry/barbershop/jastip/ppob
     total: v.number(),
     paidAmount: v.number(),
+    // Uang tunai yang benar-benar diserahkan pelanggan. Kelebihannya dari
+    // nominal yang masuk laci adalah kembalian.
+    cashTendered: v.optional(v.number()),
     changeAmount: v.number(),
     costTotal: v.number(), // HPP
     status: v.union(
@@ -514,6 +517,9 @@ export default defineSchema({
     serviceType: v.string(), // CUCI_SATU, CUCI_LIPAT, SETrika, ...
     pricePerKg: v.number(),
     weightKg: v.number(),
+    // Biaya layanan datar per transaksi, ditambahkan di atas berat × harga.
+    // Opsional supaya order lama yang dibuat sebelum ada biaya ini tetap valid.
+    serviceFee: v.optional(v.number()),
     totalAmount: v.number(),
     paidAmount: v.number(),
     status: v.union(
@@ -561,6 +567,10 @@ export default defineSchema({
     queueNumber: v.number(),
     scheduledAt: v.number(),
     price: v.number(),
+    // Biaya layanan datar per booking, ditambahkan di atas harga layanan.
+    // Opsional supaya booking lama yang dibuat sebelum ada biaya ini valid.
+    serviceFee: v.optional(v.number()),
+    totalAmount: v.optional(v.number()),
     status: v.union(
       v.literal("WAITING"),
       v.literal("IN_PROGRESS"),
@@ -580,13 +590,19 @@ export default defineSchema({
     customerType: v.union(v.literal("STUDENT"), v.literal("WALK_IN")),
     customerStudentId: v.optional(v.id("students")),
     customerName: v.string(),
-    buyerName: v.string(),
+    // Nama penerima. Opsional karena form order jastip sengaja dibuat
+    // pendek: tipe pelanggan, nama, jenis pesanan, jumlah, harga.
+    buyerName: v.optional(v.string()),
+    // Kategori pesanan yang dipilih, mis. "Pakaian" atau "Buku".
+    orderType: v.optional(v.string()),
     itemsTotal: v.number(),
     serviceFee: v.number(),
-    deliveryFee: v.number(),
+    // Ongkir tidak lagi ditagih; field lama dibiarkan opsional supaya
+    // order lama yang sudah tersimpan tetap terbaca.
+    deliveryFee: v.optional(v.number()),
     totalAmount: v.number(),
     paidAmount: v.number(),
-    destination: v.string(),
+    destination: v.optional(v.string()),
     status: v.union(
       v.literal("PENDING"),
       v.literal("PICKED_UP"),
@@ -602,7 +618,8 @@ export default defineSchema({
 
   jastipItems: defineTable({
     orderId: v.id("jastipOrders"),
-    name: v.string(),
+    name: v.optional(v.string()),
+    orderType: v.optional(v.string()),
     quantity: v.number(),
     price: v.number(),
     note: v.optional(v.string()),
@@ -644,6 +661,9 @@ export default defineSchema({
     providerReference: v.optional(v.string()),
     status: v.union(
       v.literal("PENDING"),
+      // Provider sudah charged, tapi pelanggan belum membayar. Transaksi
+      // diselesaikan di halaman kasir.
+      v.literal("AWAITING_PAYMENT"),
       v.literal("SUCCESS"),
       v.literal("FAILED"),
       v.literal("REFUNDED"),

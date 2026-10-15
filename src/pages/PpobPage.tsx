@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useAction, useMutation, useQuery } from "convex/react";
+import { useNavigate } from "react-router-dom";
 import { Zap, Loader2, RefreshCw, CheckCircle2, XCircle, AlertTriangle, Info } from "lucide-react";
 import { api } from "../convex/_generated/api";
 import { useAuth } from "@/components/auth/AuthProvider";
 import {
   PageHeader,
+  Money,
   EmptyState,
   AlertBanner,
   errorMessage,
@@ -36,10 +38,10 @@ const CATEGORY_LABELS: Record<string, string> = {
 
 export default function PpobPage() {
   const { can } = useAuth();
+  const navigate = useNavigate();
   const [productId, setProductId] = useState("");
   const [identifier, setIdentifier] = useState("");
   const [studentId, setStudentId] = useState("");
-  const [method, setMethod] = useState<"WALLET" | "CASH">("CASH");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<any>(null);
@@ -162,12 +164,11 @@ export default function PpobPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>Santri (untuk pembayaran wallet)</Label>
+              <Label>Santri (bisa dibayar dari wallet)</Label>
               <select
                 className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm"
                 value={studentId}
                 onChange={(e) => setStudentId(e.target.value)}
-                disabled={method === "CASH"}
               >
                 <option value="">— Tidak ada —</option>
                 {((students && !("error" in students) ? students.items : []) as any[]).map(
@@ -180,28 +181,15 @@ export default function PpobPage() {
               </select>
             </div>
 
-            <div className="grid grid-cols-2 gap-1.5">
-              {(["CASH", "WALLET"] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setMethod(m)}
-                  disabled={m === "WALLET" && !studentId}
-                  className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                    method === m
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border hover:bg-muted"
-                  }`}
-                >
-                  {m === "CASH" ? "Tunai" : "Wallet Santri"}
-                </button>
-              ))}
-            </div>
+            <p className="text-xs text-muted-foreground">
+              Setelah disimpan, Anda diarahkan ke halaman kasir untuk memilih
+              skema pembayaran dan menyelesaikan transaksi.
+            </p>
 
             {error && <AlertBanner variant="ERROR" title="Transaksi gagal">{error}</AlertBanner>}
 
             {result && (
-              <AlertBanner variant="SUCCESS" title="Transaksi Berhasil">
+              <AlertBanner variant="SUCCESS" title="Transaksi berhasil — menunggu pembayaran">
                 <p>
                   Kode: <span className="font-mono">{result.code}</span>
                 </p>
@@ -214,9 +202,18 @@ export default function PpobPage() {
               </AlertBanner>
             )}
 
+            {result && (
+              <Button
+                className="w-full"
+                onClick={() => navigate(`/app/pos?ppob=${result.transactionId}`)}
+              >
+                Bayar di Kasir — <Money value={Number(selected?.price ?? 0)} />
+              </Button>
+            )}
+
             <Button
               className="w-full"
-              disabled={busy || !selected || !identifier.trim() || (method === "WALLET" && !studentId)}
+              disabled={busy || !selected || !identifier.trim()}
               onClick={async () => {
                 setBusy(true);
                 setError(null);
@@ -226,8 +223,11 @@ export default function PpobPage() {
                     await create({
                       productId: productId as any,
                       customerIdentifier: identifier.trim(),
-                      studentId: method === "WALLET" ? (studentId as any) : undefined,
-                      paymentMethod: method,
+                      studentId: (studentId as any) || undefined,
+                      paymentMethod: "CASH",
+                      // Provider di-charge sekarang, pembayaran diselesaikan
+                      // di halaman kasir.
+                      deferPayment: true,
                       idempotencyKey: `ppob-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                     }),
                   );
@@ -245,7 +245,7 @@ export default function PpobPage() {
                 </>
               ) : (
                 <>
-                  <Zap className="h-4 w-4" /> Proses Transaksi
+                  <Zap className="h-4 w-4" /> Simpan &amp; Bayar di Kasir
                 </>
               )}
             </Button>

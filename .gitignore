@@ -16,3 +16,7 @@ coverage/
 .vly-run/
 .render-check.mjs
 smoke-bundle.mjs
+.render-authed.mjs
+
+# Salinan hasil build yang dipakai saat uji rilis lokal (bukan sumber)
+isolate/

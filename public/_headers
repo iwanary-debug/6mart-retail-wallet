@@ -1,0 +1,13 @@
+# Cache aset hasil build dengan versi di dalam namanya (Vite memberi hash),
+# jadi aman disimpan lama. index.html tidak boleh di-cache supaya deploy baru
+# langsung terbaca.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/index.html
+  Cache-Control: no-cache, must-revalidate
+
+# Cegah browser menebak-nebak tipe berkas dari konten aset.
+/assets/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

@@ -362,68 +362,92 @@ export const create = mutation({
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
     assertPermission(user, PERMISSIONS.STUDENT_MANAGE);
+    return await createStudentInternal(ctx, user, args);
+  },
+});
 
-    const nis = requireString(args.nis, "NIS", 30);
-    const name = requireString(args.name, "Nama", 120);
-    const className = requireString(args.className, "Kelas", 40);
+/**
+ * Membuat satu data santri beserta seluruh perangkat pendampingnya.
+ *
+ * Dipisah dari mutation supaya impor CSV dan input manual memakai aturan yang
+ * persis sama untuk NIS ganda, wallet, kartu, dan orang tua.
+ */
+export async function createStudentInternal(
+  ctx: any,
+  user: SessionUser,
+  args: {
+    nis: string;
+    name: string;
+    gender: "L" | "P";
+    className: string;
+    dormitory?: string;
+    room?: string;
+    parentId?: Id<"parents">;
+    parentRelation?: string;
+    createWallet?: boolean;
+    createCard?: boolean;
+  },
+) {
+  const nis = requireString(args.nis, "NIS", 30);
+  const name = requireString(args.name, "Nama", 120);
+  const className = requireString(args.className, "Kelas", 40);
 
-    const dup = await ctx.db
-      .query("students")
-      .withIndex("by_nis", (q) => q.eq("nis", nis))
-      .unique();
-    if (dup) throw new BusinessRuleError(`NIS ${nis} sudah terdaftar`);
+  const dup = await ctx.db
+    .query("students")
+    .withIndex("by_nis", (q: any) => q.eq("nis", nis))
+    .unique();
+  if (dup) throw new BusinessRuleError(`NIS ${nis} sudah terdaftar`);
 
-    const now = Date.now();
-    const studentId = await ctx.db.insert("students", {
-      nis,
-      name,
-      gender: args.gender,
-      className,
-      dormitory: args.dormitory?.trim() || undefined,
-      room: args.room?.trim() || undefined,
-      status: "ACTIVE",
+  const now = Date.now();
+  const studentId = await ctx.db.insert("students", {
+    nis,
+    name,
+    gender: args.gender,
+    className,
+    dormitory: args.dormitory?.trim() || undefined,
+    room: args.room?.trim() || undefined,
+    status: "ACTIVE",
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  // Wallet otomatis dibuat dengan saldo 0 — saldo HANYA bisa berubah via ledger.
+  const walletId = args.createWallet === false ? null : await ensureWallet(ctx, studentId, now);
+  if (walletId) {
+    await ctx.db.insert("walletLimits", {
+      studentId,
+      ...DEFAULT_LIMITS,
       createdAt: now,
       updatedAt: now,
     });
+  }
 
-    // Wallet otomatis dibuat dengan saldo 0 — saldo HANYA bisa berubah via ledger.
-    const walletId = args.createWallet === false ? null : await ensureWallet(ctx, studentId, now);
-    if (walletId) {
-      await ctx.db.insert("walletLimits", {
-        studentId,
-        ...DEFAULT_LIMITS,
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
-
-    if (args.parentId) {
-      await ctx.db.insert("parentStudents", {
-        parentId: args.parentId,
-        studentId,
-        relation: args.parentRelation ?? "WALI",
-        isPrimary: true,
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
-
-    let cardId: Id<"studentCards"> | null = null;
-    if (args.createCard !== false) {
-      cardId = await createCardInternal(ctx, user, studentId, now);
-    }
-
-    await writeAudit(ctx, {
-      user,
-      action: "CREATE_STUDENT",
-      entityType: "student",
-      entityId: studentId,
-      newValue: { nis, name, className },
+  if (args.parentId) {
+    await ctx.db.insert("parentStudents", {
+      parentId: args.parentId,
+      studentId,
+      relation: args.parentRelation ?? "WALI",
+      isPrimary: true,
+      createdAt: now,
+      updatedAt: now,
     });
+  }
 
-    return { studentId, walletId, cardId };
-  },
-});
+  let cardId: Id<"studentCards"> | null = null;
+  if (args.createCard !== false) {
+    cardId = await createCardInternal(ctx, user, studentId, now);
+  }
+
+  await writeAudit(ctx, {
+    user,
+    action: "CREATE_STUDENT",
+    entityType: "student",
+    entityId: studentId,
+    newValue: { nis, name, className },
+  });
+
+  return { studentId, walletId, cardId };
+}
 
 export const update = mutation({
   args: {

@@ -21,7 +21,8 @@ export interface AppSettings {
   qrEnabled: boolean;
   cashPaymentEnabled: boolean;
   jastipServiceFee: number;
-  jastipDeliveryFee: number;
+  laundryServiceFee: number;
+  barbershopServiceFee: number;
   ppobProvider: string;
   environment: string;
 }
@@ -43,7 +44,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   qrEnabled: true,
   cashPaymentEnabled: true,
   jastipServiceFee: 3000,
-  jastipDeliveryFee: 5000,
+  // Biaya layanan datar per transaksi, ditambahkan di atas harga barang
+  // (laundry per kg) atau harga layanan (barbershop).
+  laundryServiceFee: 1000,
+  barbershopServiceFee: 1000,
   ppobProvider: "SANDBOX",
   environment: "DEVELOPMENT",
 };
@@ -65,7 +69,8 @@ const SETTING_META: Record<keyof AppSettings, { group: string; label: string; ty
   qrEnabled: { group: "Identifikasi", label: "QR Aktif", type: "BOOLEAN" },
   cashPaymentEnabled: { group: "Identifikasi", label: "Pembayaran Tunai Aktif", type: "BOOLEAN" },
   jastipServiceFee: { group: "Jastip", label: "Biaya Layanan Jastip", type: "NUMBER" },
-  jastipDeliveryFee: { group: "Jastip", label: "Biaya Pengiriman Jastip", type: "NUMBER" },
+  laundryServiceFee: { group: "Laundry", label: "Biaya Layanan Laundry", type: "NUMBER" },
+  barbershopServiceFee: { group: "Barbershop", label: "Biaya Layanan Barbershop", type: "NUMBER" },
   ppobProvider: { group: "PPOB", label: "Provider PPOB", type: "STRING" },
   environment: { group: "Sistem", label: "Environment", type: "STRING" },
 };

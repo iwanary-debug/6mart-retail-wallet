@@ -163,16 +163,26 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
   [ROLES.CASHIER]: CASHIER_PERMISSIONS,
   [ROLES.INVENTORY]: INVENTORY_PERMISSIONS,
   [ROLES.FINANCE]: FINANCE_PERMISSIONS,
+  // Owner / Management: oversee seluruh toko. Master data (produk, santri,
+  // supplier) boleh dikelola karena managing data adalah tugas manajemen —
+  // tanpa ini halaman Produk dan Santri tidak muncul sama sekali di menu
+  // Master Data. Jurnal keuangan, void penjualan, pengaturan, dan manajemen
+  // pengguna tetap tidak dibuka supaya peran ini tetap bukan super admin.
   [ROLES.OWNER]: [
     PERMISSIONS.DASHBOARD_VIEW,
     PERMISSIONS.DASHBOARD_FINANCIAL,
     PERMISSIONS.REPORT_VIEW,
     PERMISSIONS.REPORT_FINANCIAL,
     PERMISSIONS.SALE_VIEW,
+    PERMISSIONS.PRODUCT_VIEW,
+    PERMISSIONS.PRODUCT_MANAGE,
+    PERMISSIONS.SUPPLIER_MANAGE,
     PERMISSIONS.INVENTORY_VIEW,
+    PERMISSIONS.STUDENT_VIEW,
+    PERMISSIONS.STUDENT_MANAGE,
+    PERMISSIONS.PARENT_MANAGE,
     PERMISSIONS.WALLET_VIEW,
     PERMISSIONS.FINANCE_VIEW,
-    PERMISSIONS.STUDENT_VIEW,
     PERMISSIONS.AUDIT_VIEW,
   ],
   [ROLES.PARENT]: [PERMISSIONS.WALLET_VIEW_OWN, PERMISSIONS.STUDENT_VIEW],

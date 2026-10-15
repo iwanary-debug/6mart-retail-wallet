@@ -13,9 +13,17 @@
     "convex:dev": "convex dev --once",
     "auth:keygen": "node scripts/generate-auth-jwt.mjs",
     "check:render": "node scripts/check-render.mjs",
+    "check:render:authed": "node scripts/check-render-authed.mjs",
     "check:imports": "node scripts/crawl-imports.mjs",
     "check:pages": "node scripts/check-page-access.mjs",
-    "check:permissions": "node scripts/check-frontend-permissions.mjs"
+    "check:permissions": "node scripts/check-frontend-permissions.mjs",
+    "check:cash": "node scripts/verify-cash-change.mjs",
+    "check:shift": "node scripts/verify-shift-expected.mjs",
+    "check:payonsite": "node scripts/verify-pay-on-site.mjs",
+    "check:import": "node scripts/verify-import.mjs",
+    "check:wallet": "node scripts/verify-wallet-ops.mjs",
+    "check:fees": "node scripts/verify-fees-ppob.mjs",
+    "check:render:roles": "for r in cashier manager owner inventory finance supervisor admin; do SMOKE_ROLE=$r node scripts/check-render-authed.mjs | grep -E '^GAGAL|^HASIL' || exit 1; done"
   },
   "dependencies": {
     "@convex-dev/auth": "^0.0.95",

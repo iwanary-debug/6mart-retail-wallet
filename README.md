@@ -73,17 +73,72 @@ server, bukan hanya disembunyikan di UI.
 
 ## Konfigurasi
 
-Nilai environment disimpan di `.env.local` (dikelola lewat Settings, jangan
-diedit manual di repo):
+Ada DUA tempat nilai environment, dan keduanya tidak boleh tertukar:
+
+**1. Environment deployment Convex** (diatur lewat `convex env set`, bukan file):
 
 | Variabel | Isi |
 |---|---|
-| `VITE_CONVEX_URL` | URL deployment Convex |
-| `VITE_CONVEX_SITE_URL` | site URL, jadi issuer JWT |
-| `JWT_PRIVATE_KEY` | private key PKCS#8 RSA untuk menandatangani JWT |
-| `JWKS` | public key dalam format JSON |
+| `JWT_PRIVATE_KEY` | private key PKCS#8 RSA untuk menandatangani JWT (RAHASIA) |
+| `JWKS` | public key JSON, dilayani di `/.well-known/jwks.json` |
+| `AUTH_JWKS_DATA_URI` | public key + `kid` sebagai `data:` URI; ini yang dipakai `auth.config.ts` untuk MEMVERIFIKASI token |
+| `CONVEX_SITE_URL` | disediakan otomatis oleh Convex: issuer JWT |
 
-> `JWT_PRIVATE_KEY` adalah rahasia. Jangan pernah di-commit.
+`bun run auth:keygen` mengisi ketiga nilai pertama sekaligus. Karena
+`auth.config.ts` membaca issuer dari `CONVEX_SITE_URL`, file itu **tidak perlu
+diubah** saat pindah dari development ke production.
+
+**2. Environment build frontend** (di `.env.local`, atau di dashboard hosting):
+
+| Variabel | Isi |
+|---|---|
+| `VITE_CONVEX_URL` | URL deployment Convex, dibekukan saat build |
+
+> `.env.local` hanya untuk development dan di-gitignore. Hosting produksi
+> (Cloudflare Pages / Freebuff) wajib diberi `VITE_CONVEX_URL` sendiri, kalau
+> tidak aplikasi akan gagal dengan `No address provided to ConvexReactClient`.
+
+> `JWT_PRIVATE_KEY` adalah rahasia. Jangan pernah di-commit atau ditempel ke chat.
+
+---
+
+## Deploy ke produksi
+
+```bash
+# 1. Keypair auth KHUSUS production (tidak ditulis ke disk sandbox)
+bun run auth:keygen -- --prod
+
+# 2. Push fungsi, skema, dan indeks ke deployment production
+bunx convex deploy
+
+# 3. Seed database production — hanya bisa saat database masih kosong
+bunx convex run --prod seed:bootstrap
+bunx convex run --prod seed:createDemoAccounts
+
+# 4. Satukan dokumen staff dengan dokumen akun Convex Auth — WAJIB.
+#    Tanpa langkah ini sign in berhasil tetapi langsung ditolak dengan
+#    "Akun Anda belum memiliki peran di sistem 6Mart" karena peran ada di
+#    dokumen staff, bukan di dokumen akun auth.
+bunx convex run --prod seed:linkAuthAccounts
+
+# 5. Verifikasi login terhadap production (tiap peran)
+CONVEX_URL=https://<deployment-prod>.convex.cloud node scripts/verify-auth.mjs
+```
+
+Langkah 3 membuat akun demo (password `6mart2026`) beserta transaksi contoh.
+**Ganti password akun demo sebelum dipakai sungguhan.**
+
+> **Pesan error di production.** Convex menyembunyikan detail error server di deployment production: klien menerima `Server Error` + Request ID, termasuk
+untuk penolakan RBAC dan pesan validasi. Akibatnya `scripts/verify-app.mjs`
+melaporkan penolakan yang sah sebagai `GAGAL` saat dijalankan ke production.
+Pengaturan ini bawaan per-deployment dan bisa diubah di dashboard Convex
+deployment → Settings → **Server errors**; cara permanen di sisi kode adalah
+melempar error aplikasi sebagai `ConvexError`.
+
+Di hosting (Cloudflare Pages → Settings → Build): build command `bun run build`,
+output directory `dist`, dan env var `VITE_CONVEX_URL` seperti pada langkah 5.
+`public/_redirects` dan `public/_headers` sudah ikut ter-build agar SPA tidak 404
+saat refresh.
 
 ---
 

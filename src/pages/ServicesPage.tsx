@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
+import { useNavigate } from "react-router-dom";
 import {
   Shirt,
   Scissors,
@@ -7,7 +8,6 @@ import {
   Plus,
   Loader2,
   CheckCircle2,
-  PlusCircle,
 } from "lucide-react";
 import { api } from "../convex/_generated/api";
 import {
@@ -58,6 +58,14 @@ const BOOKING_STATUS: Record<string, { label: string; variant: any }> = {
   CANCELLED: { label: "Dibatalkan", variant: "destructive" },
   NO_SHOW: { label: "Tidak Datang", variant: "warning" },
 };
+
+/**
+ * Pilihan jenis pesanan jastip.
+ *
+ * Disediakan tiga jenis saja karena itu yang benar-benar dipakai rutin di
+ * sekolah. Menambah daftar hanya memperpanjang form tanpa manfaat.
+ */
+const JASTIP_ORDER_TYPES = ["Mie Gacoan", "Roti Gembul", "Surma"];
 
 const JASTIP_STATUS: Record<string, { label: string; variant: any }> = {
   PENDING: { label: "Menunggu", variant: "muted" },
@@ -379,8 +387,7 @@ export default function ServicesPage() {
                       <TableRow>
                         <TableHead>Kode</TableHead>
                         <TableHead>Pengirim</TableHead>
-                        <TableHead>Penerima</TableHead>
-                        <TableHead>Tujuan</TableHead>
+                        <TableHead>Jenis Pesanan</TableHead>
                         <TableHead className="text-right">Barang</TableHead>
                         <TableHead className="text-right">Biaya Layanan</TableHead>
                         <TableHead>Status</TableHead>
@@ -392,8 +399,9 @@ export default function ServicesPage() {
                         <TableRow key={o._id}>
                           <TableCell className="font-mono text-xs">{o.code}</TableCell>
                           <TableCell className="text-sm">{o.customerName}</TableCell>
-                          <TableCell className="text-sm">{o.buyerName}</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{o.destination}</TableCell>
+                          <TableCell className="text-sm">
+                            {o.orderType ?? o.buyerName ?? o.destination ?? "—"}
+                          </TableCell>
                           <TableCell className="text-right tabular-nums">
                             {formatNumber(o.itemsTotal, 0)}
                           </TableCell>
@@ -494,7 +502,12 @@ export default function ServicesPage() {
         open={jastipOpen}
         onOpenChange={setJastipOpen}
         students={studentOptions}
-        onSubmit={async (args) => createJastip(args as any)}
+        onSubmit={async (args) => {
+          // Order disimpan dulu, lalu kasir diarahkan ke halaman kasir untuk
+          // menyelesaikan pembayaran — sama seperti saat belanja barang.
+          const res: any = await createJastip(args as any);
+          return res;
+        }}
       />
     </div>
   );
@@ -517,10 +530,17 @@ function LaundryDialog({
   const [serviceType, setServiceType] = useState("Cuci Satuan");
   const [pricePerKg, setPricePerKg] = useState(7000);
   const [weightKg, setWeightKg] = useState<number | "">(2);
+  const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const total = (Number(weightKg) || 0) * pricePerKg;
+  const fees = useQuery(api.settings.getAll, {});
+  // Biaya layanan datar ditambahkan di atas berat × harga per kg.
+  const serviceFee = Number(
+    (fees && !("error" in fees) ? (fees as any)?.laundryServiceFee : 0) ?? 0,
+  );
+  const laundryBase = (Number(weightKg) || 0) * pricePerKg;
+  const total = laundryBase + serviceFee;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -599,10 +619,28 @@ function LaundryDialog({
           </div>
         </div>
 
-        <div className="flex justify-between rounded-lg bg-muted/50 px-3 py-2">
-          <span className="text-sm font-medium">Total</span>
-          <span className="font-bold tabular-nums">{formatNumber(total, 0)}</span>
+        {/* Harga laundry dan jasa layanan ditampilkan terpisah supaya
+            kasir bisa melihat keduanya, bukan hanya total akhir. */}
+        <div className="space-y-1 rounded-lg border border-dashed border-border px-3 py-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">
+              Harga laundry ({Number(weightKg) || 0} kg × {formatNumber(pricePerKg, 0)})
+            </span>
+            <span className="tabular-nums">{formatNumber(laundryBase, 0)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Jasa layanan</span>
+            <span className="tabular-nums">{formatNumber(serviceFee, 0)}</span>
+          </div>
+          <div className="flex justify-between border-t border-border pt-1.5 font-bold">
+            <span>Total</span>
+            <span className="tabular-nums">{formatNumber(total, 0)}</span>
+          </div>
         </div>
+
+        <p className="text-xs text-muted-foreground">
+          Setelah disimpan, Anda diarahkan ke halaman kasir untuk membayar.
+        </p>
 
         {error && <p className="text-sm text-destructive">{error}</p>}
 
@@ -616,7 +654,7 @@ function LaundryDialog({
               setBusy(true);
               setError(null);
               try {
-                await onSubmit({
+                const res: any = await onSubmit({
                   customerType,
                   customerStudentId: customerType === "STUDENT" ? studentId : undefined,
                   customerName: name || "Umum",
@@ -625,6 +663,9 @@ function LaundryDialog({
                   weightKg: Number(weightKg) || 0,
                 });
                 onOpenChange(false);
+                // Pembayaran diselesaikan di halaman kasir, sama seperti
+                // saat belanja barang.
+                if (res?.orderId) navigate(`/app/pos?laundry=${res.orderId}`);
               } catch (err) {
                 setError(errorMessage(err));
               } finally {
@@ -632,7 +673,7 @@ function LaundryDialog({
               }
             }}
           >
-            {busy && <Loader2 className="h-4 w-4 animate-spin" />} Simpan
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />} Simpan &amp; Bayar
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -658,8 +699,17 @@ function BookingDialog({
   const [studentId, setStudentId] = useState("");
   const [name, setName] = useState("");
   const [barberName, setBarberName] = useState("Pak Ahmad");
+  const navigate = useNavigate();
+  const fees = useQuery(api.settings.getAll, {});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const service = services.find((s) => s._id === serviceId) ?? null;
+  // Biaya layanan datar ditambahkan di atas harga layanan pilihan.
+  const serviceFee = Number(
+    (fees && !("error" in fees) ? (fees as any)?.barbershopServiceFee : 0) ?? 0,
+  );
+  const total = Number(service?.price ?? 0) + serviceFee;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -730,6 +780,25 @@ function BookingDialog({
           </div>
         </div>
 
+        {total > 0 && (
+          <div className="space-y-1 rounded-lg border border-dashed border-border px-3 py-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Harga jasa</span>
+              <span className="tabular-nums">
+                {formatNumber(Number(service?.price ?? 0), 0)}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Jasa layanan</span>
+              <span className="tabular-nums">{formatNumber(serviceFee, 0)}</span>
+            </div>
+            <div className="flex justify-between border-t border-border pt-1.5 font-bold">
+              <span>Total</span>
+              <span className="tabular-nums">{formatNumber(total, 0)}</span>
+            </div>
+          </div>
+        )}
+
         {error && <p className="text-sm text-destructive">{error}</p>}
 
         <DialogFooter>
@@ -742,7 +811,7 @@ function BookingDialog({
               setBusy(true);
               setError(null);
               try {
-                await onSubmit({
+                const res: any = await onSubmit({
                   serviceId,
                   customerType,
                   customerStudentId: customerType === "STUDENT" ? studentId : undefined,
@@ -750,6 +819,7 @@ function BookingDialog({
                   barberName,
                 });
                 onOpenChange(false);
+                if (res?.id) navigate(`/app/pos?booking=${res.id}`);
               } catch (err) {
                 setError(errorMessage(err));
               } finally {
@@ -757,7 +827,7 @@ function BookingDialog({
               }
             }}
           >
-            {busy && <Loader2 className="h-4 w-4 animate-spin" />} Simpan
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />} Simpan &amp; Bayar
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -776,33 +846,51 @@ function JastipDialog({
   students: any[];
   onSubmit: (args: any) => Promise<unknown>;
 }) {
+  // Form jastip sengaja dibuat pendek: tipe pelanggan, nama, jenis pesanan,
+  // jumlah, harga. Nis dan tujuan tidak lagi ditanyakan karena bikin lambat.
   const [customerType, setCustomerType] = useState("STUDENT");
   const [studentId, setStudentId] = useState("");
   const [name, setName] = useState("");
-  const [buyerName, setBuyerName] = useState("");
-  const [destination, setDestination] = useState("");
-  const [items, setItems] = useState<{ name: string; quantity: number; price: number }[]>([
-    { name: "", quantity: 1, price: 0 },
-  ]);
+  const navigate = useNavigate();
+  const [orderType, setOrderType] = useState("Mie Gacoan");
+  const [quantity, setQuantity] = useState<number | "">(1);
+  const [price, setPrice] = useState<number | "">("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const itemsTotal = items.reduce((s, i) => s + i.quantity * i.price, 0);
+  const quantityNum = Number(quantity) || 0;
+  const priceNum = Number(price) || 0;
+  const itemsTotal = quantityNum * priceNum;
+
+  // Biaya layanan dan ongkir diambil dari pengaturan, jadi kasir tidak perlu
+  // mengetik. Yang diketik hanya nilai barang.
+  const fees = useQuery(api.settings.getAll, {});
+  const serviceFee = Number(
+    (fees && !("error" in fees) ? (fees as any)?.jastipServiceFee : 0) ?? 0,
+  );
+  // Ongkir tidak lagi ditagih; total = nilai pesanan + jasa layanan.
+  const chargeTotal = itemsTotal + serviceFee;
+
+  const valid =
+    (customerType === "WALK_IN" ? name.trim().length > 0 : studentId !== "") &&
+    orderType.trim().length > 0 &&
+    quantityNum > 0 &&
+    priceNum > 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Order Jastip Baru</DialogTitle>
           <DialogDescription>
-            Biaya layanan & pengiriman dihitung otomatis dari pengaturan. Nilai barang dibayar
-            terpisah ke penerima.
+            Isi lima isian singkat lalu bayar langsung di tempat. Biaya layanan dan
+            ongkir sudah dihitung otomatis.
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label>Tipe Pengirim</Label>
+            <Label>Tipe Pelanggan</Label>
             <select
               className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm"
               value={customerType}
@@ -812,9 +900,10 @@ function JastipDialog({
               <option value="WALK_IN">Umum</option>
             </select>
           </div>
-          {customerType === "STUDENT" ? (
-            <div className="space-y-1.5">
-              <Label>Santri</Label>
+
+          <div className="space-y-1.5">
+            <Label>Nama</Label>
+            {customerType === "STUDENT" ? (
               <select
                 className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm"
                 value={studentId}
@@ -831,87 +920,82 @@ function JastipDialog({
                   </option>
                 ))}
               </select>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              <Label>Nama Pengirim</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} />
-            </div>
-          )}
-          <div className="space-y-1.5">
-            <Label>Nama Penerima</Label>
-            <Input value={buyerName} onChange={(e) => setBuyerName(e.target.value)} />
+            ) : (
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Nama pengirim"
+              />
+            )}
           </div>
+
           <div className="space-y-1.5 sm:col-span-2">
-            <Label>Tujuan</Label>
+            <Label>Jenis Pesanan</Label>
+            <div className="flex flex-wrap gap-1.5">
+              {JASTIP_ORDER_TYPES.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setOrderType(t)}
+                  className={
+                    orderType === t
+                      ? "rounded-lg border border-primary bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary"
+                      : "rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted"
+                  }
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Jumlah</Label>
             <Input
-              value={destination}
-              onChange={(e) => setDestination(e.target.value)}
-              placeholder="mis. Marketplace, Eats, dsb"
+              inputMode="numeric"
+              value={quantity || ""}
+              onChange={(e) => setQuantity(Number(e.target.value) || 0)}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Harga</Label>
+            <Input
+              inputMode="numeric"
+              placeholder="0"
+              value={price || ""}
+              onChange={(e) => setPrice(Number(e.target.value) || 0)}
             />
           </div>
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label>Barang</Label>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setItems([...items, { name: "", quantity: 1, price: 0 }])}
-            >
-              <PlusCircle className="h-3.5 w-3.5" /> Baris
-            </Button>
+        <div className="space-y-1 rounded-lg border border-dashed border-border px-3 py-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">
+              Harga ({quantityNum} × <Money value={priceNum} />)
+            </span>
+            <span className="tabular-nums">
+              <Money value={itemsTotal} />
+            </span>
           </div>
-          {items.map((it, i) => (
-            <div key={i} className="grid grid-cols-12 gap-1.5">
-              <Input
-                className="col-span-5 h-9 px-2 text-sm"
-                placeholder="Nama barang"
-                value={it.name}
-                onChange={(e) =>
-                  setItems(items.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
-                }
-              />
-              <Input
-                className="col-span-2 h-9 px-2 text-sm"
-                inputMode="numeric"
-                placeholder="Qty"
-                value={it.quantity || ""}
-                onChange={(e) =>
-                  setItems(
-                    items.map((x, j) =>
-                      j === i ? { ...x, quantity: Number(e.target.value) || 0 } : x,
-                    ),
-                  )
-                }
-              />
-              <Input
-                className="col-span-4 h-9 px-2 text-sm"
-                inputMode="numeric"
-                placeholder="Harga"
-                value={it.price || ""}
-                onChange={(e) =>
-                  setItems(
-                    items.map((x, j) => (j === i ? { ...x, price: Number(e.target.value) || 0 } : x)),
-                  )
-                }
-              />
-              <Button
-                size="icon"
-                variant="ghost"
-                className="col-span-1 h-9 w-9"
-                onClick={() => setItems(items.filter((_, j) => j !== i))}
-                disabled={items.length === 1}
-              >
-                ×
-              </Button>
-            </div>
-          ))}
-          <p className="text-right text-sm text-muted-foreground">
-            Total barang: <Money value={itemsTotal} />
-          </p>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Jasa layanan</span>
+            <span className="tabular-nums">
+              <Money value={serviceFee} />
+            </span>
+          </div>
+          <div className="flex justify-between border-t border-border pt-1.5 font-bold">
+            <span>Total</span>
+            <span className="tabular-nums">
+              <Money value={chargeTotal} />
+            </span>
+          </div>
         </div>
+
+        <p className="text-xs text-muted-foreground">
+          Setelah disimpan, Anda diarahkan ke halaman kasir untuk membayar —
+          di sana total, skema pembayaran, nominal, dan kembaliannya.
+        </p>
 
         {error && <p className="text-sm text-destructive">{error}</p>}
 
@@ -920,20 +1004,27 @@ function JastipDialog({
             Batal
           </Button>
           <Button
-            disabled={busy || !buyerName || !destination}
+            disabled={busy || !valid}
             onClick={async () => {
               setBusy(true);
               setError(null);
               try {
-                await onSubmit({
+                const res: any = await onSubmit({
                   customerType,
                   customerStudentId: customerType === "STUDENT" ? studentId : undefined,
                   customerName: name || "Umum",
-                  buyerName,
-                  destination,
-                  items: items.filter((i) => i.name.trim()),
+                  orderType,
+                  items: [
+                    { orderType, quantity: quantityNum, price: priceNum },
+                  ],
                 });
                 onOpenChange(false);
+                // Pembayaran diselesaikan di halaman kasir, bukan di dialog
+                // ini — supaya total, skema pembayaran, nominal, dan
+                // kembalian terlihat seperti saat belanja barang.
+                if (res?.orderId) {
+                  navigate(`/app/pos?jastip=${res.orderId}`);
+                }
               } catch (err) {
                 setError(errorMessage(err));
               } finally {
@@ -941,7 +1032,7 @@ function JastipDialog({
               }
             }}
           >
-            {busy && <Loader2 className="h-4 w-4 animate-spin" />} Simpan
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />} Simpan &amp; Bayar di Kasir
           </Button>
         </DialogFooter>
       </DialogContent>

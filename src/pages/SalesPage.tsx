@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "convex/react";
 import { Search, Receipt, Printer, Undo2, Ban, Loader2, Eye } from "lucide-react";
 import { api } from "../convex/_generated/api";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { useDateRange } from "@/hooks/useDateRange";
 import {
   PageHeader,
   LoadingState,
@@ -60,6 +61,8 @@ export default function SalesPage() {
   // Catatan: pada convex 1.46, `skip` adalah NILAI pada posisi args, bukan
   // field di dalam objek args.
   const canReport = can(PERMISSIONS.REPORT_VIEW);
+  const { from, to } = useDateRange(30);
+  const range = { from, to };
   const report = useQuery(
     api.reports.salesReport,
     canReport ? { period } : "skip",
@@ -68,13 +71,7 @@ export default function SalesPage() {
   const voidSale = useMutation(api.sales.voidSale);
   const csv = useQuery(
     api.reports.exportCsv,
-    canReport
-      ? {
-          dataset: "sales" as const,
-          from: Date.now() - 30 * 86_400_000,
-          to: Date.now(),
-        }
-      : "skip",
+    canReport ? { dataset: "sales" as const, ...range } : "skip",
   );
 
   if (list === undefined) return <LoadingState label="Memuat transaksi…" />;

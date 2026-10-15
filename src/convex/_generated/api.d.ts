@@ -12,6 +12,7 @@ import type * as audit from "../audit.js";
 import type * as auth from "../auth.js";
 import type * as dashboard from "../dashboard.js";
 import type * as finance from "../finance.js";
+import type * as import_ from "../import.js";
 import type * as inventory from "../inventory.js";
 import type * as lib_guards from "../lib/guards.js";
 import type * as lib_helpers from "../lib/helpers.js";
@@ -41,6 +42,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   dashboard: typeof dashboard;
   finance: typeof finance;
+  import: typeof import_;
   inventory: typeof inventory;
   "lib/guards": typeof lib_guards;
   "lib/helpers": typeof lib_helpers;

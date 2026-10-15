@@ -1,0 +1,4 @@
+# Cloudflare Pages: aplikasi ini memakai BrowserRouter, jadi setiap alamat
+# seperti /app/produk atau /auth adalah rute di sisi klien — bukan berkas di
+# server. Tanpa baris ini, Load Ulang (F5) atau bookmark akan mendapat 404.
+/*    /index.html   200

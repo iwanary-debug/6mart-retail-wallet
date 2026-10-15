@@ -218,13 +218,24 @@ export const ensureAuthAccount = internalAction({
 
     // Memakai alur signUp resmi Convex Auth sehingga password di-hash
     // (Scrypt) di server dan tidak pernah disimpan plaintext.
+    //
+    // `Password` dari @convex-dev/auth adalah FACTORY: memanggilnya tanpa
+    // argumen menghasilkan provider instance. Mengoper factory-nya langsung
+    // membuat `provider.type` undefined dan signUp gagal dengan
+    // "Provider type undefined is not supported yet".
+    //
+    // Argumennya juga harus berbentuk `{ params }` (sama seperti action
+    // `auth:signIn`), bukan parameter provider yang datar — kalau datar,
+    // provider membaca `flow` dari objek kosong dan menolaknya.
     const { signInViaProvider } = await import("@convex-dev/auth/server");
     const { Password } = await import("@convex-dev/auth/providers/Password");
-    const result = await signInViaProvider(ctx as never, Password as never, {
-      flow: "signUp",
-      email: args.email,
-      password: args.password,
-      name: args.name,
+    const result = await signInViaProvider(ctx as never, Password({}) as never, {
+      params: {
+        flow: "signUp",
+        email: args.email,
+        password: args.password,
+        name: args.name,
+      },
     } as never);
 
     const subject = result?.userId;

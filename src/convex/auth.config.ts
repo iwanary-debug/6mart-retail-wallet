@@ -1,12 +1,28 @@
 import type { AuthConfig } from "convex/server";
 
 /**
- * DIHASILKAN OLEH scripts/generate-auth-jwt.mjs — JANGAN DIEDIT TANGAN.
+ * Konfigurasi verifikasi JWT Convex Auth untuk 6Mart.
  *
- * Konfigurasi verifikasi JWT untuk deployment 6Mart.
+ * Token diterbitkan @convex-dev/auth dengan `iss` = CONVEX_SITE_URL deployment
+ * dan `aud` = "convex".
  *
- * Token diterbitkan @convex-dev/auth dengan `iss` = CONVEX_SITE_URL dan
- * `aud` = "convex".
+ * Kedua nilai dibaca dari environment deployment sehingga SATU file ini
+ * berlaku untuk development DAN production:
+ *
+ *   - `CONVEX_SITE_URL`    disediakan OTOMATIS oleh Convex di setiap
+ *                          deployment (dev maupun prod). Ini issuer yang harus
+ *                          diverifikasi, jadi TIDAK BOLEH di-hardcode:
+ *                          kalau ditulis manual, login di produksi gagal
+ *                          karena token ditandatangani untuk issuer lain.
+ *   - `AUTH_JWKS_DATA_URI` public key milik deployment (data: URI hasil
+ *                          `bun run auth:keygen`, atau `-- --prod` untuk
+ *                          production).
+ *
+ * Catatan: Convex MENOLAK push bila env var yang dirujuk di file ini belum
+ * di-set di deployment, jadi nilainya selalu ada saat runtime — bukan bug bila
+ * `convex dev` gagal dengan pesan "used in auth config file but its value was
+ * not set", melainkan pengingat untuk menjalankan `bun run auth:keygen`.
+ * Helper di bawah menjaga jaminan itu tetap berlaku saat file ini dibaca ulang.
  *
  * Dua batasan backend Convex menentukan bentuk file ini:
  *
@@ -16,20 +32,26 @@ import type { AuthConfig } from "convex/server";
  * 2. Provider `customJwt` mewajibkan header `kid` pada token. Library
  *    @convex-dev/auth tidak menambahkan `kid`, sehingga `src/convex/auth.ts`
  *    membungkus action `signIn` untuk menandatangani ulang token dengan
- *    `kid` di sini.
- *
- * Jalankan `bun run auth:keygen` bila keypair perlu di-regenerate.
+ *    `kid` yang sama dengan JWK di `AUTH_JWKS_DATA_URI`.
  */
-const JWKS_DATA_URI =
-  "data:application/json;base64,eyJrZXlzIjpbeyJrdHkiOiJSU0EiLCJuIjoiakV3N2dDV3BwQVNBVHJQN2V4Sm1FMGJFWW9Lc0N2SVJGR0R4YjJ2OWNLXy1MRjZqZjhadlp1LThPWXIzMlRlc0k5c0ktSTRsdllpc19zeURZbjN0b3hZQmNJUTA3b0k5a3BtejRIWGlGVG1JUWJjQ0s0azJpRTFzR0d4RXFCd00wYVdEeEdJbERTXzdZcWlqM21NdGFHSml4MVkzZnNuRWpRR3FoQXh4WkZPWVR3VGJqX3dHR243ZGw3VWxRdkc4b1BSZkpLalY3eUNrWHhaQkh6UmZnUzBIOE8xTVVvUk5RYUY4azhMeEpQTVJtVjl6OUlPaXYtOVMzZzNfRWQzN1ZiSS0ycmZZQnpSVHE3dUVvdWxtWDRVMWZmUEJSbkFvbnhabmxYTkhFUWtVdlRQMkQ4M1BsWGpnRzlfcnNoNWxSdjdCVHAwcFRJZDVDVG1ZNHRuTnV3IiwiZSI6IkFRQUIiLCJhbGciOiJSUzI1NiIsInVzZSI6InNpZyIsImtpZCI6IjZNYXJ0LTAifV19";
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(
+      `Environment variable ${name} belum di-set di deployment ini. ` +
+        'Jalankan "bun run auth:keygen" (tambahkan "-- --prod" untuk production).',
+    );
+  }
+  return value;
+}
 
 const config = {
   providers: [
     {
       type: "customJwt" as const,
       applicationID: "convex",
-      issuer: "https://vibrant-puffin-745.convex.site",
-      jwks: JWKS_DATA_URI,
+      issuer: requiredEnv("CONVEX_SITE_URL"),
+      jwks: requiredEnv("AUTH_JWKS_DATA_URI"),
       algorithm: "RS256" as const,
     },
   ],

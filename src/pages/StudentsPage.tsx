@@ -1,9 +1,19 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery } from "convex/react";
-import { Plus, Search, Users, Nfc, QrCode, Loader2, Wallet as WalletIcon } from "lucide-react";
+import {
+  Plus,
+  Search,
+  Users,
+  Nfc,
+  QrCode,
+  Loader2,
+  Upload,
+  Wallet as WalletIcon,
+} from "lucide-react";
 import { api } from "../convex/_generated/api";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { CsvImportDialog } from "@/components/common/CsvImportDialog";
 import {
   PageHeader,
   Money,
@@ -40,6 +50,7 @@ export default function StudentsPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("ACTIVE");
   const [createOpen, setCreateOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const list = useQuery(api.students.list, {
     search: search || undefined,
@@ -48,6 +59,7 @@ export default function StudentsPage() {
   });
   const classes = useQuery(api.students.listClasses, {});
   const create = useMutation(api.students.create);
+  const importStudents = useMutation(api.import.importStudents);
 
   if (list === undefined) return <LoadingState label="Memuat data santri…" />;
   if ("error" in list) return <ErrorState message={String(list.error)} />;
@@ -59,9 +71,14 @@ export default function StudentsPage() {
         description="Master data santri, wallet, dan kartu RFID/QR."
         action={
           can(PERMISSIONS.STUDENT_MANAGE) && (
-            <Button onClick={() => setCreateOpen(true)}>
-              <Plus className="h-4 w-4" /> Tambah Santri
-            </Button>
+            <>
+              <Button variant="outline" onClick={() => setImportOpen(true)}>
+                <Upload className="h-4 w-4" /> Import CSV
+              </Button>
+              <Button onClick={() => setCreateOpen(true)}>
+                <Plus className="h-4 w-4" /> Tambah Santri
+              </Button>
+            </>
           )
         }
       />
@@ -166,7 +183,20 @@ export default function StudentsPage() {
         onCreate={async (args) => {
           await create(args);
         }}
-        />
+      />
+
+      <CsvImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        title="Import Santri dari CSV"
+        template={{
+          filename: "template-santri.csv",
+          header: "nis,nama,jenisKelamin,kelas,asrama,kamar",
+          example: "26001,Ahmad Fauzi,L,6A,Asrama A,101",
+          required: ["nis", "nama", "jenisKelamin", "kelas"],
+        }}
+        onImport={async (rows) => (await importStudents({ rows: rows as any })) as any}
+      />
     </div>
   );
 }

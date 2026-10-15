@@ -1,14 +1,28 @@
 /**
- * Menyiapkan keypair JWT untuk Convex Auth (lingkungan DEVELOPMENT).
+ * Menyiapkan keypair JWT untuk Convex Auth.
  *
- * Convex Auth membutuhkan dua environment variable di deployment:
- *   - JWT_PRIVATE_KEY : private key PKCS#8 (RSA / RS256)
- *   - JWKS             : public JWK dalam format JSON
+ * Convex Auth membutuhkan tiga environment variable di deployment:
+ *   - JWT_PRIVATE_KEY     : private key PKCS#8 (RSA / RS256) — dipakai
+ *                           @convex-dev/auth untuk menandatangani token.
+ *   - JWKS                : public JWK (JSON) — dipakai library untuk endpoint
+ *                           /.well-known/jwks.json.
+ *   - AUTH_JWKS_DATA_URI  : public JWK yang sama sebagai `data:` URI, dengan
+ *                           `kid` "6Mart-0". Inilah kunci yang dipakai
+ *                           `src/convex/auth.config.ts` untuk MEMVERIFIKASI
+ *                           token (lihat komentar di file itu).
  *
- * Untuk production, keypair harus dibuat dan disimpan di secret manager lalu
- * di-inject lewat `freebuff-deploy env set` — jangan commit key ke repo.
+ * Issuer TIDAK ikut ditulis ke mana pun: `auth.config.ts` membacanya dari
+ * `CONVEX_SITE_URL` yang disediakan Convex di setiap deployment, sehingga file
+ * konfigurasi tidak perlu di-generate ulang per lingkungan.
  *
- * Pemakaian:  bun run auth:keygen
+ * Pemakaian:
+ *   bun run auth:keygen           → deployment development (dan .env.local)
+ *   bun run auth:keygen -- --prod → deployment production (tanpa menyentuh
+ *                                   .env.local; keypair produksi tidak
+ *                                   ditinggalkan di sandbox)
+ *
+ * Jalankan `node scripts/verify-auth.mjs` setelahnya untuk memastikan login
+ * masih berhasil.
  */
 
 import { spawnSync } from "node:child_process";
@@ -17,16 +31,10 @@ import { readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 
 const ENV_LOCAL = ".env.local";
 const TEMP_ENV = ".convex-auth.env";
-const AUTH_CONFIG = "src/convex/auth.config.ts";
+const IS_PROD = process.argv.includes("--prod");
 
-/**
- * Issuer = CONVEX_SITE_URL deployment aktif. Nilai ini juga ditulis ke
- * .env.local sebagai VITE_CONVEX_SITE_URL supaya token yang diterbitkan dan
- * yang diverifikasi memakai issuer yang sama.
- */
-const ISSUER =
-  process.env.VITE_CONVEX_SITE_URL?.trim() ||
-  "https://vibrant-puffin-745.convex.site";
+/** Harus sama dengan JWT_KID di src/convex/auth.ts. */
+const JWT_KID = "6Mart-0";
 
 // Convex Auth mengimpor private key sebagai `rsaEncryption`, jadi harus RSA.
 const { privateKey, publicKey } = await generateKeyPair("RS256", {
@@ -38,91 +46,88 @@ const privatePem = await exportPKCS8(privateKey);
 const publicJwk = await exportJWK(publicKey);
 publicJwk.alg = "RS256";
 publicJwk.use = "sig";
-// Header token dari @convex-dev/auth tidak memuat `kid`, jadi JWKS juga tidak
-// diberi kid agar backend dapat memilih kunci tanpa ambigu.
-delete publicJwk.kid;
+
+// Untuk endpoint /.well-known, jangan sertakan kid: header token dari
+// @convex-dev/auth tidak memuat kid, jadi kunci tanpa kid tidak ambigu.
 const jwks = JSON.stringify({ keys: [publicJwk] });
 
-// 1. Tulis ke .env.local agar proses preview (Vite/Convex CLI) ikut memuatnya.
-let existing = existsSync(ENV_LOCAL) ? readFileSync(ENV_LOCAL, "utf8") : "";
-existing = existing
-  .split("\n")
-  .filter(
-    (line) =>
-      !line.startsWith("JWT_PRIVATE_KEY=") &&
-      !line.startsWith("JWKS=") &&
-      !line.startsWith("VITE_CONVEX_SITE_URL="),
-  )
-  .join("\n")
-  .replace(/\n{3,}/g, "\n\n")
-  .replace(/\n*$/, "\n");
+// Untuk verifikasi di auth.config.ts, kid WAJIB ada karena token ditandatangani
+// ulang oleh `signIn` (src/convex/auth.ts) dengan kid ini.
+const jwkWithKid = { ...publicJwk, kid: JWT_KID };
+const jwksDataUri =
+  "data:application/json;base64," +
+  Buffer.from(JSON.stringify({ keys: [jwkWithKid] }), "utf8").toString("base64");
 
-writeFileSync(
-  ENV_LOCAL,
-  existing +
-    "\n# --- Convex Auth (dihasilkan oleh scripts/generate-auth-jwt.mjs) ---\n" +
-    `JWT_PRIVATE_KEY=${JSON.stringify(privatePem)}\n` +
-    `JWKS=${JSON.stringify(jwks)}\n` +
-    `VITE_CONVEX_SITE_URL=${JSON.stringify(ISSUER)}\n`,
-  "utf8",
-);
-
-// 2. Daftarkan ke deployment Convex. Nilai multi-line tidak bisa dikirim sebagai
-//    argumen CLI (PEM diawali "-" sehingga dibaca sebagai opsi), jadi lewat file.
+// 1. Nilai multi-line tidak bisa dikirim sebagai argumen CLI (PEM diawali "-"
+//    sehingga dibaca sebagai opsi), jadi dikirim lewat file sementara.
 writeFileSync(
   TEMP_ENV,
-  `JWT_PRIVATE_KEY="${privatePem.replace(/\n/g, "\\n")}"\nJWKS="${jwks}"\nVITE_CONVEX_SITE_URL="${ISSUER}"\n`,
+  `JWT_PRIVATE_KEY="${privatePem.replace(/\n/g, "\\n")}"\n` +
+    `JWKS="${jwks}"\n` +
+    `AUTH_JWKS_DATA_URI="${jwksDataUri}"\n`,
   "utf8",
 );
-const result = spawnSync("bunx", ["convex", "env", "set", "--from-file", TEMP_ENV, "--force"], {
+
+const args = ["convex", "env", "set", "--from-file", TEMP_ENV, "--force"];
+if (IS_PROD) args.push("--prod");
+
+const result = spawnSync("bunx", args, {
   stdio: ["ignore", "pipe", "pipe"],
   encoding: "utf8",
 });
 rmSync(TEMP_ENV, { force: true });
 
-// 3. Tulis auth.config.ts dengan public key di-inline, sehingga backend dapat
-//    memverifikasi token tanpa OIDC discovery.
-writeFileSync(
-  AUTH_CONFIG,
-  `import type { AuthConfig } from "convex/server";
+const output = `${result.stdout || ""}${result.stderr || ""}`
+  .split(privatePem)
+  .join("<PRIVATE_KEY>")
+  .split(jwks)
+  .join("<JWKS>")
+  .split(jwksDataUri)
+  .join("<JWKS_DATA_URI>")
+  .trim();
 
-/**
- * DIHASILKAN OLEH scripts/generate-auth-jwt.mjs — JANGAN DIEDIT TANGAN.
- *
- * Konfigurasi verifikasi JWT untuk deployment 6Mart.
- *
- * Token diterbitkan @convex-dev/auth dengan \`iss\` = CONVEX_SITE_URL dan
- * \`aud\` = "convex". Public key ditulis inline agar backend tidak perlu
- * melakukan OIDC discovery.
- *
- * Jalankan \`bun run auth:keygen\` bila keypair perlu di-regenerate.
- */
-const JWKS = ${JSON.stringify(JSON.parse(jwks), null, 2)};
-
-const config = {
-  providers: [
-    {
-      domain: ${JSON.stringify(ISSUER)},
-      applicationID: "convex",
-    },
-  ],
-};
-
-export default config satisfies AuthConfig;
-`,
-  "utf8",
-);
-console.log(`auth.config.ts ditulis ke ${AUTH_CONFIG}`);
-
-if (result.status === 0) {
-  console.log("Keypair Convex Auth dibuat dan terdaftar di deployment.");
-} else {
-  const safe = `${result.stderr || ""}${result.stdout || ""}`
-    .split(privatePem)
-    .join("<PRIVATE_KEY>")
-    .split(jwks)
-    .join("<JWKS>")
-    .slice(0, 500);
-  console.log(`Keypair ditulis ke .env.local, tetapi gagal didaftarkan: ${safe.trim()}`);
+if (result.status !== 0) {
+  console.log(`GAGAL mendaftarkan keypair ke deployment${IS_PROD ? " production" : ""}:`);
+  console.log(output.slice(0, 600));
   process.exitCode = 1;
+} else {
+  console.log(
+    `Keypair Convex Auth dibuat dan terdaftar di deployment ${
+      IS_PROD ? "PRODUCTION" : "development"
+    }.`,
+  );
 }
+
+// 2. Hanya lingkungan development yang nilainya disimpan di .env.local. Keypair
+//    production sengaja TIDAK ditulis ke disk sandbox.
+if (!IS_PROD && result.status === 0) {
+  let existing = existsSync(ENV_LOCAL) ? readFileSync(ENV_LOCAL, "utf8") : "";
+  existing = existing
+    .split("\n")
+    .filter(
+      (line) =>
+        !line.startsWith("JWT_PRIVATE_KEY=") &&
+        !line.startsWith("JWKS=") &&
+        !line.startsWith("AUTH_JWKS_DATA_URI="),
+    )
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\n*$/, "\n");
+
+  writeFileSync(
+    ENV_LOCAL,
+    existing +
+      "\n# --- Convex Auth (dihasilkan oleh scripts/generate-auth-jwt.mjs) ---\n" +
+      `JWT_PRIVATE_KEY=${JSON.stringify(privatePem)}\n` +
+      `JWKS=${JSON.stringify(jwks)}\n` +
+      `AUTH_JWKS_DATA_URI=${JSON.stringify(jwksDataUri)}\n`,
+    "utf8",
+  );
+  console.log(`${ENV_LOCAL} diperbarui.`);
+}
+
+console.log(
+  IS_PROD
+    ? "Selanjutnya: deploy fungsi ke production (`bunx convex deploy`) lalu uji login di produksi."
+    : "Selanjutnya: `node scripts/verify-auth.mjs` untuk memastikan login masih berhasil.",
+);

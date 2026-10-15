@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "convex/react";
 import { Download, FileBarChart, Wallet, Boxes, Banknote, Receipt } from "lucide-react";
 import { api } from "../convex/_generated/api";
@@ -41,8 +41,12 @@ export default function ReportsPage() {
   const [period, setPeriod] = useState("month");
   const [dataset, setDataset] = useState<Dataset>("sales");
 
-  const from = useMemoFrom(period);
-  const to = Date.now();
+  // `to` harus stabil: kalau `Date.now()` dipanggil tiap render, args
+  // exportCsv selalu berubah, Convex memasang ulang subscription, dan React
+  // berhenti dengan "Too many re-renders".
+  const anchor = useRef<number>(Date.now()).current;
+  const from = useMemoFrom(period, anchor);
+  const to = anchor;
 
   // Halaman ini dipagari `report.view`, tetapi tiap tab butuh izin yang
   // berbeda. Query yang tidak di-skip akan melempar ForbiddenError dari
@@ -604,8 +608,7 @@ export default function ReportsPage() {
   );
 }
 
-function useMemoFrom(period: string): number {
-  const now = Date.now();
+function useMemoFrom(period: string, now: number): number {
   const day = 86_400_000;
   switch (period) {
     case "today": {

@@ -88,6 +88,52 @@ export const openShift = mutation({
   },
 });
 
+/**
+ * Menghitung Expected kas untuk satu shift dari transaksi kasnya.
+ *
+ * Nilai `expectedCash` yang tersimpan di dokumen shift HANYA akurat setelah
+ * shift ditutup. Selama shift masih terbuka, field itu masih sama dengan
+ * modal awal — penjualan tunai yang masuk tidak pernah ikut dihitung. Karena
+ * itu modal "Tutup Shift" harus menghitung ulang dari transaksi, bukan
+ * membaca field yang tersimpan.
+ *
+ * Rumus yang sama dipakai `closeShift` supaya angka di layar dan angka yang
+ * tercatat di audit log tidak pernah berbeda.
+ */
+function computeShiftCash(
+  shift: {
+    openingCash: number;
+    cashIn: number;
+    cashOut: number;
+    cashExpenses: number;
+  },
+  txs: { type: string; direction: string; amount: number }[],
+) {
+  const cashSales = roundToPen(
+    txs
+      .filter((t) => t.type === "SALE" && t.direction === "IN")
+      .reduce((s, t) => s + t.amount, 0),
+  );
+  const withdrawals = roundToPen(
+    txs.filter((t) => t.type === "WITHDRAWAL").reduce((s, t) => s + t.amount, 0),
+  );
+  const expenses = roundToPen(
+    txs.filter((t) => t.type === "EXPENSE").reduce((s, t) => s + t.amount, 0),
+  );
+  const cashIn = roundToPen(
+    txs.filter((t) => t.type === "CASH_IN").reduce((s, t) => s + t.amount, 0),
+  );
+  const cashOut = roundToPen(
+    txs.filter((t) => t.type === "CASH_OUT").reduce((s, t) => s + t.amount, 0),
+  );
+
+  const expectedCash = roundToSen(
+    shift.openingCash + cashSales + cashIn - withdrawals - expenses - cashOut,
+  );
+
+  return { cashSales, withdrawals, expenses, cashIn, cashOut, expectedCash };
+}
+
 export const closeShift = mutation({
   args: { shiftId: v.id("cashierShifts"), actualCash: v.number(), note: v.optional(v.string()) },
   handler: async (ctx, args) => {
@@ -107,27 +153,8 @@ export const closeShift = mutation({
       .query("cashTransactions")
       .withIndex("by_shift", (q) => q.eq("shiftId", args.shiftId))
       .collect();
-    const cashSales = roundToPen(
-      txs
-        .filter((t) => t.type === "SALE" && t.direction === "IN")
-        .reduce((s, t) => s + t.amount, 0),
-    );
-    const withdrawals = roundToPen(
-      txs.filter((t) => t.type === "WITHDRAWAL").reduce((s, t) => s + t.amount, 0),
-    );
-    const expenses = roundToPen(
-      txs.filter((t) => t.type === "EXPENSE").reduce((s, t) => s + t.amount, 0),
-    );
-    const cashIn = roundToPen(
-      txs.filter((t) => t.type === "CASH_IN").reduce((s, t) => s + t.amount, 0),
-    );
-    const cashOut = roundToPen(
-      txs.filter((t) => t.type === "CASH_OUT").reduce((s, t) => s + t.amount, 0),
-    );
-
-    const expectedCash = roundToSen(
-      shift.openingCash + cashSales + cashIn - withdrawals - expenses - cashOut,
-    );
+    const { cashSales, expenses, cashIn, cashOut, expectedCash } =
+      computeShiftCash(shift, txs);
     const difference = roundToSen(args.actualCash - expectedCash);
     const now = Date.now();
 
@@ -211,7 +238,15 @@ export const shiftDetail = query({
       .query("sales")
       .withIndex("by_shift", (q) => q.eq("shiftId", args.shiftId))
       .collect();
-    return { shift, transactions: txs.sort((a, b) => a.createdAt - b.createdAt), sales };
+    // `shift.expectedCash` baru akurat setelah shift ditutup, jadi frontend
+    // membutuhkan angka yang dihitung ulang dari transaksi kas.
+    const cash = computeShiftCash(shift, txs);
+    return {
+      shift,
+      ...cash,
+      transactions: txs.sort((a, b) => a.createdAt - b.createdAt),
+      sales,
+    };
   },
 });
 
@@ -395,6 +430,7 @@ export const checkout = mutation({
     ),
     walletAmount: v.optional(v.number()),
     cashAmount: v.optional(v.number()),
+    cashTendered: v.optional(v.number()),
     globalDiscount: v.optional(v.number()),
     idempotencyKey: v.string(),
     note: v.optional(v.string()),
@@ -456,6 +492,7 @@ async function processCheckout(
     identificationMethod?: "RFID" | "QR" | "NIS" | "MANUAL";
     walletAmount?: number;
     cashAmount?: number;
+    cashTendered?: number;
     globalDiscount?: number;
     idempotencyKey: string;
     note?: string;
@@ -512,9 +549,22 @@ async function processCheckout(
   if (total <= 0) throw new BusinessRuleError("Total transaksi harus lebih dari 0");
 
   // 4. Validasi pembayaran
+  //
+  // `cashAmount` = nominal tunai yang HARUS masuk laci.
+  // `cashTendered` = uang yang benar-benar diserahkan pelanggan. Kelebihannya
+  // menjadi kembalian: keluar lagi ke pelanggan, jadi TIDAK menambah uang di
+  // laci maupun penjualan tunai shift.
+  //
+  // Tanpa `cashTendered`, kembalian selalu nol karena `cashAmount` dipatok
+  // tepat sebesar tagihan.
   const walletAmount = Math.min(args.walletAmount ?? 0, total);
   const cashAmount = Math.min(args.cashAmount ?? 0, roundToSen(total - walletAmount));
+  const cashTendered = Math.max(
+    cashAmount,
+    Math.min(args.cashTendered ?? cashAmount, cashAmount + 1_000_000),
+  );
   const paidAmount = roundToSen(walletAmount + cashAmount);
+  const changeDue = roundToSen(cashTendered - cashAmount);
   if (paidAmount < total) {
     throw new BusinessRuleError(
       `Pembayaran kurang. Total ${total}, dibayar ${paidAmount}.`,
@@ -565,7 +615,8 @@ async function processCheckout(
     serviceTotal: 0,
     total,
     paidAmount,
-    changeAmount: roundToSen(paidAmount - total),
+    changeAmount: changeDue,
+    cashTendered,
     costTotal: 0,
     status: "COMPLETED",
     receiptNote: args.note,
@@ -718,7 +769,8 @@ async function processCheckout(
     subtotal,
     discount: totalDiscount,
     paidAmount,
-    changeAmount: roundToSen(paidAmount - total),
+    changeAmount: changeDue,
+    cashTendered,
     paymentMethod,
     balanceAfter,
     cogs: cogsTotal,

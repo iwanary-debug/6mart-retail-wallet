@@ -47,7 +47,10 @@ const QUERIES = [
   ["finance:trialBalance", {}],
   ["finance:profitAndLoss", {}],
   ["finance:chartOfAccounts", {}],
-  ["finance:generalLedger", {}],
+  // `accountCode` wajib dan harus kode yang benar-benar ada, kalau tidak
+  // errornya NotFoundError/ArgumentValidationError, bukan ForbiddenError —
+  // sehingga izin query ini tidak pernah benar-benar diuji.
+  ["finance:generalLedger", { accountCode: "1000" }],
   ["finance:cashSummary", {}],
   ["finance:listJournals", { limit: 1 }],
   ["finance:listExpenses", { limit: 1 }],

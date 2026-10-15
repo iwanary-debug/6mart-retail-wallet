@@ -1,8 +1,18 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { Plus, Search, Package, Loader2, Archive, Pencil, ArrowDownToLine } from "lucide-react";
+import {
+  Plus,
+  Search,
+  Package,
+  Loader2,
+  Archive,
+  Pencil,
+  ArrowDownToLine,
+  Upload,
+} from "lucide-react";
 import { api } from "../convex/_generated/api";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { CsvImportDialog } from "@/components/common/CsvImportDialog";
 import {
   PageHeader,
   Money,
@@ -53,6 +63,7 @@ export default function ProductsPage() {
   const [search, setSearch] = useState("");
   const [lowStockOnly, setLowStockOnly] = useState(false);
   const [dialog, setDialog] = useState<"create" | "edit" | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<any>(null);
 
   const list = useQuery(api.products.listProducts, {
@@ -65,6 +76,7 @@ export default function ProductsPage() {
   const create = useMutation(api.products.createProduct);
   const update = useMutation(api.products.updateProduct);
   const archive = useMutation(api.products.archiveProduct);
+  const importProducts = useMutation(api.import.importProducts);
 
   if (list === undefined) return <LoadingState label="Memuat produk…" />;
   if ("error" in list) return <ErrorState message={String(list.error)} />;
@@ -85,6 +97,9 @@ export default function ProductsPage() {
                 }}
               >
                 <ArrowDownToLine className="h-4 w-4" /> Tambah Stok
+              </Button>
+              <Button variant="outline" onClick={() => setImportOpen(true)}>
+                <Upload className="h-4 w-4" /> Import CSV
               </Button>
               <Button
                 onClick={() => {
@@ -213,6 +228,22 @@ export default function ProductsPage() {
           if (editing) await update({ id: editing._id, ...args });
           else await create(args as any);
         }}
+      />
+
+      <CsvImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        title="Import Produk dari CSV"
+        template={{
+          filename: "template-produk.csv",
+          header: "sku,nama,barcode,satuan,hargaBeli,hargaJual,stokMin",
+          example:
+            "BRG-001,Air Mineral 600ml,8999999520017,pcs,2000,3000,10",
+          required: ["sku", "nama", "hargaBeli", "hargaJual"],
+        }}
+        onImport={async (rows) =>
+          (await importProducts({ rows: rows as any })) as any
+        }
       />
     </div>
   );

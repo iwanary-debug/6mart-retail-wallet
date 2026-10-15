@@ -31,6 +31,11 @@ jobs:
       - name: Unit tests
         run: bun test
 
+      # Menangkap halaman terproteksi yang loop render karena args query-nya
+      # tidak stabil. Semua dependensi di-stub, jadi tidak butuh jaringan.
+      - name: Render check (authenticated pages)
+        run: bun run check:render:authed
+
       # The chunk-size warning this surfaces is advisory, not a failure, so the
       # build is only allowed to fail on a real compile or bundle error.
       - name: Build

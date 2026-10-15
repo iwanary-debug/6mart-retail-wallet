@@ -1,4 +1,5 @@
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
 import { mutation, query } from "./_generated/server";
 import {
   assertPermission,
@@ -47,6 +48,10 @@ export const createLaundryOrder = mutation({
     weightKg: v.number(),
     note: v.optional(v.string()),
     dueAt: v.optional(v.number()),
+    // Bayar di tempat: order laundry langsung dibayar setelah dibuat.
+    payNow: v.optional(v.boolean()),
+    paymentMethod: v.optional(v.union(v.literal("WALLET"), v.literal("CASH"))),
+    idempotencyKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
@@ -54,8 +59,11 @@ export const createLaundryOrder = mutation({
     const serviceType = requireString(args.serviceType, "Jenis layanan", 60);
     if (args.weightKg <= 0) throw new BusinessRuleError("Berat harus lebih dari 0");
     assertRupiah(args.pricePerKg, "Harga per kg");
+    const settings = await getSettings(ctx);
 
-    const totalAmount = roundToSen(args.weightKg * args.pricePerKg);
+    // Biaya layanan datar ditambahkan di atas berat × harga per kg.
+    const serviceFee = roundToSen(settings.laundryServiceFee);
+    const totalAmount = roundToSen(args.weightKg * args.pricePerKg + serviceFee);
     if (totalAmount <= 0) throw new BusinessRuleError("Total laundry tidak valid");
 
     const now = Date.now();
@@ -69,6 +77,7 @@ export const createLaundryOrder = mutation({
       serviceType,
       pricePerKg: args.pricePerKg,
       weightKg: args.weightKg,
+      serviceFee,
       totalAmount,
       paidAmount: 0,
       status: "PENDING",
@@ -85,7 +94,23 @@ export const createLaundryOrder = mutation({
       entityId: orderId,
       newValue: { code, totalAmount, weightKg: args.weightKg },
     });
-    return { orderId, code, totalAmount };
+    // Bayar di tempat supaya kasir tidak perlu membuka halaman kasir lagi.
+    let payment: { saleId: Id<"sales">; code: string; total: number } | null = null;
+    if (args.payNow) {
+      const fresh = await ctx.db.get(orderId);
+      if (fresh) {
+        payment = await settleLaundryOrder(
+          ctx,
+          user,
+          fresh,
+          args.paymentMethod ?? "CASH",
+          args.idempotencyKey ?? `laundry-create-${code}`,
+          now,
+        );
+      }
+    }
+
+    return { orderId, code, totalAmount, payment };
   },
 });
 
@@ -156,24 +181,27 @@ export const updateLaundryStatus = mutation({
 });
 
 /** Pembayaran laundry → terjual ke wallet (opsional) atau tunai. */
-export const payLaundry = mutation({
-  args: {
-    orderId: v.id("laundryOrders"),
-    method: v.union(v.literal("WALLET"), v.literal("CASH")),
-    idempotencyKey: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    assertPermission(user, PERMISSIONS.SERVICE_LAUNDRY);
-    const order = await ctx.db.get(args.orderId);
-    if (!order) throw new NotFoundError("Order tidak ditemukan");
-    if (order.saleId) throw new BusinessRuleError("Order laundry sudah dibayar");
-    if (order.totalAmount <= 0) throw new BusinessRuleError("Total tidak valid");
+/**
+ * Menyelesaikan pembayaran satu order laundry.
+ *
+ * Dipisah dari mutation supaya bisa dipakai dari tombol "Bayar" pada daftar
+ * order maupun langsung dari form order baru (`payNow`), dengan aturan yang
+ * sama. Bayar di tempat berarti kasir tidak perlu membuka halaman kasir.
+ */
+async function settleLaundryOrder(
+  ctx: any,
+  user: Awaited<ReturnType<typeof requireUser>>,
+  order: { _id: Id<"laundryOrders"> } & Record<string, any>,
+  method: "WALLET" | "CASH",
+  idempotencyKey: string,
+  now: number,
+) {
+  if (order.saleId) throw new BusinessRuleError("Order laundry sudah dibayar");
+  if (order.totalAmount <= 0) throw new BusinessRuleError("Total tidak valid");
 
-    const code = order.code;
-    const now = Date.now();
+  const code = order.code;
 
-    if (args.method === "WALLET") {
+  if (method === "WALLET") {
       if (!order.customerStudentId) {
         throw new BusinessRuleError("Santri belum ditentukan untuk pembayaran wallet");
       }
@@ -184,7 +212,7 @@ export const payLaundry = mutation({
         note: `Laundry ${code}`,
         referenceType: "laundryOrder",
         referenceId: code,
-        idempotencyKey: args.idempotencyKey,
+        idempotencyKey: idempotencyKey,
       });
     }
 
@@ -196,8 +224,8 @@ export const payLaundry = mutation({
       cashierId: user.id,
       cashierName: user.name,
       channel: "SERVICE",
-      paymentMethod: args.method,
-      identificationMethod: args.method === "WALLET" ? "MANUAL" : undefined,
+      paymentMethod: method,
+      identificationMethod: method === "WALLET" ? "MANUAL" : undefined,
       subtotal: order.totalAmount,
       discount: 0,
       serviceTotal: order.totalAmount,
@@ -206,7 +234,7 @@ export const payLaundry = mutation({
       changeAmount: 0,
       costTotal: 0,
       status: "COMPLETED",
-      idempotencyKey: args.idempotencyKey,
+      idempotencyKey: idempotencyKey,
       createdAt: now,
     });
 
@@ -227,13 +255,13 @@ export const payLaundry = mutation({
 
     await ctx.db.insert("payments", {
       saleId,
-      method: args.method,
+      method: method,
       amount: order.totalAmount,
       status: "SUCCESS",
       createdAt: now,
     });
 
-    if (args.method === "CASH") {
+    if (method === "CASH") {
       await ctx.db.insert("cashTransactions", {
         type: "SALE",
         direction: "IN",
@@ -252,13 +280,13 @@ export const payLaundry = mutation({
       referenceType: "laundryOrder",
       referenceId: code,
       lines:
-        args.method === "WALLET"
+        method === "WALLET"
           ? accounting.serviceWalletJournal(accounting.COA.LAUNDRY_REVENUE, order.totalAmount)
           : accounting.serviceCashJournal(accounting.COA.LAUNDRY_REVENUE, order.totalAmount),
       user,
     });
 
-    await ctx.db.patch(args.orderId, {
+    await ctx.db.patch(order._id, {
       status: "COMPLETED",
       paidAmount: order.totalAmount,
       saleId,
@@ -269,13 +297,35 @@ export const payLaundry = mutation({
       user,
       action: "PAY_LAUNDRY",
       entityType: "laundryOrder",
-      entityId: args.orderId,
-      newValue: { code, amount: order.totalAmount, method: args.method },
+      entityId: order._id,
+      newValue: { code, amount: order.totalAmount, method: method },
     });
 
-    return { saleId, code, total: order.totalAmount, method: args.method };
+  return { saleId, code, total: order.totalAmount, method };
+}
+
+export const payLaundry = mutation({
+  args: {
+    orderId: v.id("laundryOrders"),
+    method: v.union(v.literal("WALLET"), v.literal("CASH")),
+    idempotencyKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    assertPermission(user, PERMISSIONS.SERVICE_LAUNDRY);
+    const order = await ctx.db.get(args.orderId);
+    if (!order) throw new NotFoundError("Order tidak ditemukan");
+    return settleLaundryOrder(
+      ctx,
+      user,
+      order,
+      args.method,
+      args.idempotencyKey,
+      Date.now(),
+    );
   },
 });
+
 
 // ========================================================== BARBERSHOP ====
 
@@ -339,6 +389,10 @@ export const createBooking = mutation({
     customerName: v.string(),
     barberName: v.string(),
     scheduledAt: v.optional(v.number()),
+    // Bayar di tempat: booking langsung dibayar setelah dibuat.
+    payNow: v.optional(v.boolean()),
+    paymentMethod: v.optional(v.union(v.literal("WALLET"), v.literal("CASH"))),
+    idempotencyKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
@@ -346,6 +400,10 @@ export const createBooking = mutation({
     const service = await ctx.db.get(args.serviceId);
     if (!service) throw new NotFoundError("Layanan tidak ditemukan");
     if (!service.isActive) throw new BusinessRuleError("Layanan tidak aktif");
+    const settings = await getSettings(ctx);
+    // Biaya layanan datar ditambahkan di atas harga layanan yang dipilih.
+    const serviceFee = roundToSen(settings.barbershopServiceFee);
+    const totalAmount = roundToSen(service.price + serviceFee);
 
     const now = Date.now();
     const scheduledAt = args.scheduledAt ?? now;
@@ -374,6 +432,9 @@ export const createBooking = mutation({
       queueNumber: sameDay.length + 1,
       scheduledAt,
       price: service.price,
+      // Biaya layanan datar ditambahkan di atas harga layanan.
+      serviceFee: serviceFee,
+      totalAmount: totalAmount,
       status: "WAITING",
       createdAt: now,
       updatedAt: now,
@@ -386,7 +447,23 @@ export const createBooking = mutation({
       entityId: id,
       newValue: { code, service: service.name, price: service.price },
     });
-    return { id, code, queueNumber: sameDay.length + 1 };
+    // Bayar di tempat supaya kasir tidak perlu membuka halaman kasir lagi.
+    let payment: { saleId: Id<"sales">; code: string; amount: number } | null = null;
+    if (args.payNow) {
+      const fresh = await ctx.db.get(id);
+      if (fresh) {
+        payment = await settleBooking(
+          ctx,
+          user,
+          fresh,
+          args.paymentMethod ?? "CASH",
+          args.idempotencyKey ?? `booking-create-${code}`,
+          now,
+        );
+      }
+    }
+
+    return { id, code, queueNumber: sameDay.length + 1, payment };
   },
 });
 
@@ -422,24 +499,31 @@ export const updateBookingStatus = mutation({
   },
 });
 
-export const payBooking = mutation({
-  args: {
-    bookingId: v.id("barbershopBookings"),
-    method: v.union(v.literal("WALLET"), v.literal("CASH")),
-    idempotencyKey: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const user = await requireUser(ctx);
-    assertPermission(user, PERMISSIONS.SERVICE_BARBERSHOP);
-    const booking = await ctx.db.get(args.bookingId);
-    if (!booking) throw new NotFoundError("Booking tidak ditemukan");
-    if (booking.saleId) throw new BusinessRuleError("Booking sudah dibayar");
+/**
+ * Menyelesaikan pembayaran satu booking barbershop.
+ *
+ * Dipisah dari mutation supaya bisa dipakai dari tombol "Bayar" pada daftar
+ * booking maupun langsung dari form booking baru (`payNow`), dengan aturan
+ * yang sama. Bayar di tempat berarti kasir tidak perlu membuka halaman kasir.
+ */
+async function settleBooking(
+  ctx: any,
+  user: Awaited<ReturnType<typeof requireUser>>,
+  booking: { _id: Id<"barbershopBookings"> } & Record<string, any>,
+  method: "WALLET" | "CASH",
+  idempotencyKey: string,
+  now: number,
+) {
+  if (booking.saleId) throw new BusinessRuleError("Booking sudah dibayar");
 
-    const service = await ctx.db.get(booking.serviceId);
-    const amount = booking.price;
-    const now = Date.now();
+  // Yang ditagih harga layanan + biaya layanan datar. Order lama dibuat
+  // sebelum biaya datar ada, jadi `totalAmount` bisa saja belum terisi.
+  const amount = roundToSen(
+    booking.totalAmount ?? booking.price + (booking.serviceFee ?? 0),
+  );
+  const service = await ctx.db.get(booking.serviceId as Id<"barbershopServices">);
 
-    if (args.method === "WALLET") {
+  if (method === "WALLET") {
       if (!booking.customerStudentId) {
         throw new BusinessRuleError("Santri belum ditentukan untuk pembayaran wallet");
       }
@@ -450,7 +534,7 @@ export const payBooking = mutation({
         note: `Barbershop ${booking.code}`,
         referenceType: "barbershopBooking",
         referenceId: booking.code,
-        idempotencyKey: args.idempotencyKey,
+        idempotencyKey: idempotencyKey,
       });
     }
 
@@ -462,7 +546,7 @@ export const payBooking = mutation({
       cashierId: user.id,
       cashierName: user.name,
       channel: "SERVICE",
-      paymentMethod: args.method,
+      paymentMethod: method,
       subtotal: amount,
       discount: 0,
       serviceTotal: amount,
@@ -471,7 +555,7 @@ export const payBooking = mutation({
       changeAmount: 0,
       costTotal: 0,
       status: "COMPLETED",
-      idempotencyKey: args.idempotencyKey,
+      idempotencyKey: idempotencyKey,
       createdAt: now,
     });
 
@@ -492,13 +576,13 @@ export const payBooking = mutation({
 
     await ctx.db.insert("payments", {
       saleId,
-      method: args.method,
+      method: method,
       amount,
       status: "SUCCESS",
       createdAt: now,
     });
 
-    if (args.method === "CASH") {
+    if (method === "CASH") {
       await ctx.db.insert("cashTransactions", {
         type: "SALE",
         direction: "IN",
@@ -517,25 +601,44 @@ export const payBooking = mutation({
       referenceType: "barbershopBooking",
       referenceId: booking.code,
       lines:
-        args.method === "WALLET"
+        method === "WALLET"
           ? accounting.serviceWalletJournal(accounting.COA.BARBERSHOP_REVENUE, amount)
           : accounting.serviceCashJournal(accounting.COA.BARBERSHOP_REVENUE, amount),
       user,
     });
 
-    await ctx.db.patch(args.bookingId, { status: "DONE", saleId, updatedAt: now });
+    await ctx.db.patch(booking._id, { status: "DONE", saleId, updatedAt: now });
     await writeAudit(ctx, {
       user,
       action: "PAY_BOOKING",
       entityType: "barbershopBooking",
-      entityId: args.bookingId,
-      newValue: { code: booking.code, amount, method: args.method },
+      entityId: booking._id,
+      newValue: { code: booking.code, amount, method: method },
     });
-    return { saleId, code: booking.code, total: amount };
+    return { saleId, code: booking.code, amount, method };
+}
+
+export const payBooking = mutation({
+  args: {
+    bookingId: v.id("barbershopBookings"),
+    method: v.union(v.literal("WALLET"), v.literal("CASH")),
+    idempotencyKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    assertPermission(user, PERMISSIONS.SERVICE_BARBERSHOP);
+    const booking = await ctx.db.get(args.bookingId);
+    if (!booking) throw new NotFoundError("Booking tidak ditemukan");
+    return settleBooking(
+      ctx,
+      user,
+      booking,
+      args.method,
+      args.idempotencyKey,
+      Date.now(),
+    );
   },
 });
-
-// ============================================================== JASTIP ====
 
 export const listJastip = query({
   args: { status: v.optional(v.string()), limit: v.optional(v.number()) },
@@ -555,17 +658,51 @@ export const listJastip = query({
   },
 });
 
+/**
+ * Satu order jastip beserta barangnya.
+ *
+ * Dipakai halaman kasir untuk melanjutkan pembayaran order yang baru dibuat
+ * di menu layanan, jadi kasir tidak perlu mengetik ulang.
+ */
+export const getJastip = query({
+  args: { orderId: v.id("jastipOrders") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    assertPermission(user, PERMISSIONS.SERVICE_JASTIP);
+    const order = await ctx.db.get(args.orderId);
+    if (!order) throw new NotFoundError("Order tidak ditemukan");
+    const items = await ctx.db
+      .query("jastipItems")
+      .withIndex("by_order", (q) => q.eq("orderId", args.orderId))
+      .collect();
+    return { order, items };
+  },
+});
+
 export const createJastipOrder = mutation({
   args: {
     customerType: v.union(v.literal("STUDENT"), v.literal("WALK_IN")),
     customerStudentId: v.optional(v.id("students")),
     customerName: v.string(),
-    buyerName: v.string(),
-    destination: v.string(),
+    // Form jastip sengaja dibuat pendek: tipe pelanggan, nama, jenis
+    // pesanan, jumlah, harga. Nama penerima dan tujuan menjadi opsional
+    // supaya kasir tidak perlu mengisinya.
+    buyerName: v.optional(v.string()),
+    destination: v.optional(v.string()),
+    orderType: v.optional(v.string()),
     items: v.array(
-      v.object({ name: v.string(), quantity: v.number(), price: v.number() }),
+      v.object({
+        name: v.optional(v.string()),
+        orderType: v.optional(v.string()),
+        quantity: v.number(),
+        price: v.number(),
+      }),
     ),
-    deliveryFee: v.optional(v.number()),
+    // Bayar langsung di tempat:_order baru langsung dibayar sehingga kasir
+    // tidak perlu membuka halaman kasir lagi.
+    payNow: v.optional(v.boolean()),
+    paymentMethod: v.optional(v.union(v.literal("WALLET"), v.literal("CASH"))),
+    idempotencyKey: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx);
@@ -582,9 +719,11 @@ export const createJastipOrder = mutation({
       itemsTotal = roundToSen(itemsTotal + item.quantity * item.price);
     }
 
-    const serviceFee = settings.jastipServiceFee;
-    const deliveryFee = args.deliveryFee ?? settings.jastipDeliveryFee;
-    const totalAmount = roundToSen(itemsTotal + serviceFee + deliveryFee);
+    const serviceFee = roundToSen(settings.jastipServiceFee);
+    // Yang ditagih = nilai barang + biaya layanan. Ongkir tidak lagi
+    // ditagih. Nilai barang ikut ditagih karena kasir mengetiknya di form
+    // sebagai harga pesanan.
+    const totalAmount = roundToSen(itemsTotal + serviceFee);
 
     const now = Date.now();
     const count = await ctx.db.query("jastipOrders").collect();
@@ -595,13 +734,13 @@ export const createJastipOrder = mutation({
       customerType: args.customerType,
       customerStudentId: args.customerStudentId,
       customerName: requireString(args.customerName, "Nama pengirim", 120),
-      buyerName: requireString(args.buyerName, "Nama penerima", 120),
+      buyerName: args.buyerName?.trim() || undefined,
+      orderType: args.orderType?.trim() || undefined,
       itemsTotal,
       serviceFee,
-      deliveryFee,
       totalAmount,
       paidAmount: 0,
-      destination: requireString(args.destination, "Tujuan", 200),
+      destination: args.destination?.trim() || undefined,
       status: "PENDING",
       createdAt: now,
       updatedAt: now,
@@ -610,7 +749,8 @@ export const createJastipOrder = mutation({
     for (const item of args.items) {
       await ctx.db.insert("jastipItems", {
         orderId,
-        name: item.name,
+        name: item.name?.trim() || undefined,
+        orderType: item.orderType?.trim() || undefined,
         quantity: item.quantity,
         price: item.price,
         createdAt: now,
@@ -624,7 +764,26 @@ export const createJastipOrder = mutation({
       entityId: orderId,
       newValue: { code, totalAmount, itemsTotal },
     });
-    return { orderId, code, totalAmount, serviceFee, deliveryFee };
+
+    // Bayar di tempat: order baru langsung diselesaikan supaya kasir tidak
+    // perlu membuka halaman kasir atau daftar order lagi.
+    let payment: { saleId: Id<"sales">; code: string; chargeTotal: number } | null =
+      null;
+    if (args.payNow) {
+      const fresh = await ctx.db.get(orderId);
+      if (fresh) {
+        payment = await settleJastipOrder(
+          ctx,
+          user,
+          fresh,
+          args.paymentMethod ?? "CASH",
+          args.idempotencyKey ?? `jastip-create-${code}`,
+          now,
+        );
+      }
+    }
+
+    return { orderId, code, totalAmount, serviceFee, payment };
   },
 });
 
@@ -661,6 +820,170 @@ export const updateJastipStatus = mutation({
  * Pembayaran jastip: 6Mart MENERIMA biaya layanan saja.
  * Nilai barang dikirim lewat payment gateway terpisah (tidak di 6Mart).
  */
+/**
+ * Satu order laundry beserta barangnya, untuk pembayaran di halaman kasir.
+ */
+export const getLaundry = query({
+  args: { orderId: v.id("laundryOrders") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    assertPermission(user, PERMISSIONS.SERVICE_LAUNDRY);
+    const order = await ctx.db.get(args.orderId);
+    if (!order) throw new NotFoundError("Order laundry tidak ditemukan");
+    const items = await ctx.db
+      .query("laundryItems")
+      .withIndex("by_order", (q) => q.eq("orderId", args.orderId))
+      .collect();
+    return { order, items };
+  },
+});
+
+/** Satu booking barbershop, untuk pembayaran di halaman kasir. */
+export const getBooking = query({
+  args: { bookingId: v.id("barbershopBookings") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx);
+    assertPermission(user, PERMISSIONS.SERVICE_BARBERSHOP);
+    const booking = await ctx.db.get(args.bookingId);
+    if (!booking) throw new NotFoundError("Booking tidak ditemukan");
+    const service = await ctx.db.get(booking.serviceId);
+    return { booking, service };
+  },
+});
+
+/**
+ * Menyelesaikan pembayaran satu order jastip.
+ *
+ * Dipisah dari mutation supaya bisa dipakai dua tempat: dari tombol "Bayar"
+ * pada daftar order, dan langsung dari form order baru ketika kasir memilih
+ * bayar di tempat (`payNow`). Keduanya memakai aturan yang sama.
+ *
+ * Nominal yang ditagih adalah biaya layanan PLUS biaya pengiriman. Nilai
+ * barang tidak ditagih di sini karena barang dibayar langsung oleh
+ * pengirim kepada penerima atau toko.
+ */
+async function settleJastipOrder(
+  ctx: any,
+  user: Awaited<ReturnType<typeof requireUser>>,
+  order: { _id: Id<"jastipOrders"> } & Record<string, any>,
+  method: "WALLET" | "CASH",
+  idempotencyKey: string,
+  now: number,
+) {
+  // Tagihan jastip = nilai barang + biaya layanan. Ongkir tidak ditagih;
+  // order lama yang masih punya deliveryFee ikut mengikutinya supaya
+  // nominal yang sudah disepakati tidak berubah sendiri.
+  const itemsTotal = roundToSen(order.itemsTotal ?? 0);
+  const chargeTotal = roundToSen(itemsTotal + order.serviceFee + (order.deliveryFee ?? 0));
+  if (chargeTotal <= 0) throw new BusinessRuleError("Total tidak valid");
+
+  if (method === "WALLET") {
+    if (!order.customerStudentId) {
+      throw new BusinessRuleError("Santri belum ditentukan untuk pembayaran wallet");
+    }
+    await mutateWallet(ctx, user, {
+      studentId: order.customerStudentId,
+      type: "JASTIP",
+      amount: chargeTotal,
+      note: `Jastip ${order.code}`,
+      referenceType: "jastipOrder",
+      referenceId: order.code,
+      idempotencyKey,
+    });
+  }
+
+  const label = order.orderType
+    ? `Jastip ${order.orderType}`
+    : `Jastip ke ${order.destination ?? "-"}`;
+
+  const saleId = await ctx.db.insert("sales", {
+    code: `SALE-${order.code}`,
+    invoiceNumber: `SALE-${order.code}`,
+    studentId: order.customerStudentId,
+    studentName: order.customerName,
+    cashierId: user.id,
+    cashierName: user.name,
+    channel: "SERVICE",
+    paymentMethod: method,
+    subtotal: chargeTotal,
+    discount: 0,
+    serviceTotal: chargeTotal,
+    total: chargeTotal,
+    paidAmount: chargeTotal,
+    changeAmount: 0,
+    costTotal: 0,
+    status: "COMPLETED",
+    idempotencyKey,
+    createdAt: now,
+  });
+
+  await ctx.db.insert("saleItems", {
+    saleId,
+    name: label,
+    quantity: 1,
+    unit: "order",
+    sellingPrice: chargeTotal,
+    discount: 0,
+    costPrice: 0,
+    subtotal: chargeTotal,
+    cogs: 0,
+    serviceType: "JASTIP",
+    serviceRefId: order.code,
+    createdAt: now,
+  });
+
+  await ctx.db.insert("payments", {
+    saleId,
+    method,
+    amount: chargeTotal,
+    status: "SUCCESS",
+    createdAt: now,
+  });
+
+  if (method === "CASH") {
+    await ctx.db.insert("cashTransactions", {
+      type: "SALE",
+      direction: "IN",
+      amount: chargeTotal,
+      referenceType: "jastipOrder",
+      referenceId: order.code,
+      createdBy: user.id,
+      createdAt: now,
+    });
+  }
+
+  await postJournal(ctx, {
+    entryDate: now,
+    description: `Pendapatan jastip ${order.code}`,
+    source: "SERVICE",
+    referenceType: "jastipOrder",
+    referenceId: order.code,
+    lines:
+      method === "WALLET"
+        ? accounting.serviceWalletJournal(accounting.COA.JASTIP_REVENUE, chargeTotal)
+        : accounting.serviceCashJournal(accounting.COA.JASTIP_REVENUE, chargeTotal),
+    user,
+  });
+
+  // Status TIDAK diubah menjadi DELIVERED di sini. Membayar tidak berarti
+  // paket sudah sampai; status tetap diatur terpisah dari daftar order.
+  await ctx.db.patch(order._id, {
+    paidAmount: chargeTotal,
+    saleId,
+    updatedAt: now,
+  });
+
+  await writeAudit(ctx, {
+    user,
+    action: "PAY_JASTIP",
+    entityType: "jastipOrder",
+    entityId: order._id,
+    newValue: { code: order.code, chargeTotal, method },
+  });
+
+  return { saleId, code: order.code, chargeTotal };
+}
+
 export const payJastip = mutation({
   args: {
     orderId: v.id("jastipOrders"),
@@ -673,110 +996,14 @@ export const payJastip = mutation({
     const order = await ctx.db.get(args.orderId);
     if (!order) throw new NotFoundError("Order tidak ditemukan");
     if (order.saleId) throw new BusinessRuleError("Order sudah dibayar");
-
-    const serviceFee = order.serviceFee;
-    if (serviceFee <= 0) throw new BusinessRuleError("Biaya layanan tidak valid");
-    const now = Date.now();
-
-    if (args.method === "WALLET") {
-      if (!order.customerStudentId) {
-        throw new BusinessRuleError("Santri belum ditentukan untuk pembayaran wallet");
-      }
-      await mutateWallet(ctx, user, {
-        studentId: order.customerStudentId,
-        type: "JASTIP",
-        amount: serviceFee,
-        note: `Jastip ${order.code}`,
-        referenceType: "jastipOrder",
-        referenceId: order.code,
-        idempotencyKey: args.idempotencyKey,
-      });
-    }
-
-    const saleId = await ctx.db.insert("sales", {
-      code: `SALE-${order.code}`,
-      invoiceNumber: `SALE-${order.code}`,
-      studentId: order.customerStudentId,
-      studentName: order.customerName,
-      cashierId: user.id,
-      cashierName: user.name,
-      channel: "SERVICE",
-      paymentMethod: args.method,
-      subtotal: serviceFee,
-      discount: 0,
-      serviceTotal: serviceFee,
-      total: serviceFee,
-      paidAmount: serviceFee,
-      changeAmount: 0,
-      costTotal: 0,
-      status: "COMPLETED",
-      idempotencyKey: args.idempotencyKey,
-      createdAt: now,
-    });
-
-    await ctx.db.insert("saleItems", {
-      saleId,
-      name: `Jastip ke ${order.destination}`,
-      quantity: 1,
-      unit: "order",
-      sellingPrice: serviceFee,
-      discount: 0,
-      costPrice: 0,
-      subtotal: serviceFee,
-      cogs: 0,
-      serviceType: "JASTIP",
-      serviceRefId: order.code,
-      createdAt: now,
-    });
-
-    await ctx.db.insert("payments", {
-      saleId,
-      method: args.method,
-      amount: serviceFee,
-      status: "SUCCESS",
-      createdAt: now,
-    });
-
-    if (args.method === "CASH") {
-      await ctx.db.insert("cashTransactions", {
-        type: "SALE",
-        direction: "IN",
-        amount: serviceFee,
-        referenceType: "jastipOrder",
-        referenceId: order.code,
-        createdBy: user.id,
-        createdAt: now,
-      });
-    }
-
-    await postJournal(ctx, {
-      entryDate: now,
-      description: `Pendapatan jastip ${order.code}`,
-      source: "SERVICE",
-      referenceType: "jastipOrder",
-      referenceId: order.code,
-      lines:
-        args.method === "WALLET"
-          ? accounting.serviceWalletJournal(accounting.COA.JASTIP_REVENUE, serviceFee)
-          : accounting.serviceCashJournal(accounting.COA.JASTIP_REVENUE, serviceFee),
+    return settleJastipOrder(
+      ctx,
       user,
-    });
-
-    await ctx.db.patch(args.orderId, {
-      status: "DELIVERED",
-      paidAmount: serviceFee,
-      saleId,
-      updatedAt: now,
-    });
-
-    await writeAudit(ctx, {
-      user,
-      action: "PAY_JASTIP",
-      entityType: "jastipOrder",
-      entityId: args.orderId,
-      newValue: { code: order.code, serviceFee, method: args.method },
-    });
-    return { saleId, code: order.code, serviceFee };
+      order,
+      args.method,
+      args.idempotencyKey,
+      Date.now(),
+    );
   },
 });
 

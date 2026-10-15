@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { api } from "../convex/_generated/api";
 import { useAuth } from "@/components/auth/AuthProvider";
+import { useDateRange } from "@/hooks/useDateRange";
 import {
   PageHeader,
   StatCard,
@@ -76,15 +77,11 @@ export default function WalletPage() {
   // Ekspor CSV butuh `report.view`; halaman ini digateway `wallet.view`.
   // `skip` pada convex 1.46 adalah NILAI di posisi args, bukan field args.
   const canReport = can(PERMISSIONS.REPORT_VIEW);
+  const { from, to } = useDateRange(30);
+  const range = { from, to };
   const csv = useQuery(
     api.reports.exportCsv,
-    canReport
-      ? {
-          dataset: "wallet" as const,
-          from: Date.now() - 30 * 86_400_000,
-          to: Date.now(),
-        }
-      : "skip",
+    canReport ? { dataset: "wallet" as const, ...range } : "skip",
   );
 
   const topUp = useMutation(api.wallets.topUp);
